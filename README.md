@@ -124,29 +124,6 @@ The server exposes ~50 MCP tools covering:
 - **Search**: `fulltext_search`, `list_fulltext_indexes`, `vector_search`
 - **Access**: `create_user`, `drop_user`, `grant_privileges`, `revoke_privileges`
 
-## Project Structure
-
-```
-├── build.zig                 # Build configuration (MariaDB C bindings, tests)
-├── src/
-│   ├── main.zig              # Entry point: pool init, transport dispatch
-│   ├── server.zig            # MCP JSON-RPC protocol layer
-│   ├── transport.zig         # stdio & HTTP transports (concurrent)
-│   ├── config.zig            # Environment-based configuration
-│   ├── pool.zig              # MariaDB connection pool & wrapper
-│   ├── json.zig              # JSON serialization (query results, types)
-│   ├── types.zig             # Row / QueryResult / ColumnKind types
-│   ├── url.zig               # MariaDB DSN parser
-│   ├── validation.zig        # SQL safety validation
-│   ├── c.h                   # @cImport translation unit
-│   ├── tools.json            # Tool definitions for MCP discovery
-│   └── actions/
-│       ├── mod.zig           # Tool registry & shared helpers
-│       ├── query.zig         # SELECT / INSERT / UPDATE / DELETE / EXPLAIN
-│       ├── schema.zig        # Schema introspection & DDL tools
-│       └── stubs.zig         # Placeholder stubs for unimplemented tools
-```
-
 ## License
 
 MIT
