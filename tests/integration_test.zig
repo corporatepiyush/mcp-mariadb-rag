@@ -146,7 +146,7 @@ test "integration: handleRequest initialize roundtrip" {
 
     const resp = server.handleRequest(io, testing.allocator,
         "{\"method\":\"tools/call\",\"params\":{\"name\":\"list_tables\"},\"id\":1}",
-        &pool, cfg
+        &pool, &cfg
     ) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
 

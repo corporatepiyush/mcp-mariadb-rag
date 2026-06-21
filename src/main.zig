@@ -37,10 +37,10 @@ pub fn main() !void {
 
     if (config.server.stdio) {
         std.log.info("Running in stdio mode", .{});
-        transport.runStdio(io, allocator, &pool, config);
+        transport.runStdio(io, allocator, &pool, &config);
     } else {
         std.log.info("Starting HTTP server on port {d}", .{config.server.http_port});
-        transport.runHttp(io, allocator, &pool, config);
+        transport.runHttp(io, allocator, &pool, &config);
     }
 
     std.log.info("Server shutdown complete", .{});

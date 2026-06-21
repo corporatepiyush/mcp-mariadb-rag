@@ -23,7 +23,7 @@ const MAX_INFLIGHT = 64;
 
 // ---- stdio transport: newline-delimited JSON ----------------------------
 
-pub fn runStdio(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: config_mod.Config) void {
+pub fn runStdio(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *const config_mod.Config) void {
     var in_buf: [IN_BUF_SIZE]u8 = undefined;
     var out_buf: [OUT_BUF_SIZE]u8 = undefined;
     var fr = Io.File.stdin().reader(io, &in_buf);
@@ -61,7 +61,7 @@ fn processLine(
     io: Io,
     alloc: Allocator,
     pool: *pool_mod.ConnectionPool,
-    config: config_mod.Config,
+    config: *const config_mod.Config,
     w: *Writer,
     raw: []const u8,
 ) void {
@@ -75,7 +75,7 @@ fn processLine(
 
 // ---- HTTP transport (concurrent) ----------------------------------------
 
-pub fn runHttp(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: config_mod.Config) void {
+pub fn runHttp(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *const config_mod.Config) void {
     // `IpAddress.parse` only accepts IP literals; map the loopback hostname.
     const host = if (std.ascii.eqlIgnoreCase(config.server.host, "localhost"))
         "127.0.0.1"
@@ -121,7 +121,7 @@ fn handleConnTask(
     io: Io,
     gpa: Allocator,
     pool: *pool_mod.ConnectionPool,
-    config: config_mod.Config,
+    config: *const config_mod.Config,
     stream_in: Io.net.Stream,
 ) void {
     var stream = stream_in;
@@ -143,7 +143,7 @@ fn handleHttpConn(
     alloc: Allocator,
     stream: *Io.net.Stream,
     pool: *pool_mod.ConnectionPool,
-    config: config_mod.Config,
+    config: *const config_mod.Config,
 ) void {
     var in_buf: [IN_BUF_SIZE]u8 = undefined;
     var out_buf: [OUT_BUF_SIZE]u8 = undefined;
@@ -182,7 +182,7 @@ fn handleHttpConn(
 /// Read the request line and headers, extracting Content-Length and validating
 /// the bearer token. Authorization passes automatically when no token is
 /// configured.
-fn parseHttpHeaders(r: *Io.Reader, config: config_mod.Config) !HttpRequest {
+fn parseHttpHeaders(r: *Io.Reader, config: *const config_mod.Config) !HttpRequest {
     var req: HttpRequest = .{ .authorized = (config.server.auth_token == null) };
     while (true) {
         const raw = r.takeDelimiterInclusive('\n') catch return error.BadRequest;

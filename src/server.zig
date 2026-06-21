@@ -16,7 +16,7 @@ const Writer = std.Io.Writer;
 const SUPPORTED_VERSIONS = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
 const LATEST_VERSION = "2025-11-25";
 
-const SERVER_INFO = "\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"mcp-mariadb-rag\",\"version\":\"0.1.0\"}";
+const SERVER_INFO = "\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"mcp-mariadb-rag\",\"version\":\"0.1.1\"}";
 
 // ---- response builders (write into a *Writer) ---------------------------
 
@@ -98,7 +98,7 @@ pub fn handleRequest(
     allocator: std.mem.Allocator,
     body: []const u8,
     pool: *pool_mod.ConnectionPool,
-    config: config_mod.Config,
+    config: *const config_mod.Config,
 ) ?[]const u8 {
     const trimmed = std.mem.trim(u8, body, " \t\n\r");
     if (trimmed.len == 0) return null;
@@ -138,7 +138,7 @@ fn handleToolsCall(
     id: ?Value,
     params: ?Value,
     pool: *pool_mod.ConnectionPool,
-    config: config_mod.Config,
+    config: *const config_mod.Config,
 ) ?[]const u8 {
     const tool_name = actions.getStringParam(params, "name") orelse "";
     const args = if (params) |p| (if (p == .object) p.object.get("arguments") else null) else null;

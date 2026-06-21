@@ -1,0 +1,13 @@
+.{
+    .name = .mcp_mariadb_rag,
+    .version = "0.1.1",
+    .fingerprint = 0xefade0563a668bd7,
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "tests",
+        "tests.zig",
+    },
+    .dependencies = .{},
+}
