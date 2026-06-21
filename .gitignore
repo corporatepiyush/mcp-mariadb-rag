@@ -5,3 +5,4 @@ zig-out/
 *.dSYM/
 .DS_Store
 Agent.md
+memory/

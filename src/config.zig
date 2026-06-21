@@ -115,11 +115,9 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const queue_timeout = envU32("MCP_QUEUE_TIMEOUT", 10);
     const create_timeout = envU32("MCP_CREATE_TIMEOUT", 5);
 
-    const default_engine = getEnv(allocator, "MCP_DEFAULT_ENGINE") orelse try allocator.dupe(u8, "TidesDB");
-
     return .{
         .database_url = database_url,
-        .default_engine = default_engine,
+        .default_engine = try allocator.dupe(u8, "TidesDB"),
         .tls = .{
             .enforce = envBool("MCP_DB_SSL"),
             .verify = envBool("MCP_DB_SSL_VERIFY"),

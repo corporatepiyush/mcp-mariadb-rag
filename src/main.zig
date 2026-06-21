@@ -2,6 +2,28 @@ const std = @import("std");
 const config_mod = @import("config.zig");
 const transport = @import("transport.zig");
 const pool_mod = @import("pool.zig");
+const schema_kg = @import("kg/schema.zig");
+
+fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    inline for (.{
+        schema_kg.writeCreateEntity,
+        schema_kg.writeCreateObservation,
+        schema_kg.writeCreateRelation,
+        schema_kg.writeCreateTypeDict,
+        schema_kg.writeCreateGraphStat,
+        schema_kg.writeCreateVectorEmbedding,
+    }) |write_fn| {
+        var buf: [4096]u8 = undefined;
+        var w = std.Io.Writer.fixed(&buf);
+        try write_fn(&w);
+        _ = try conn.execute(w.buffered());
+    }
+
+    std.log.info("Knowledge graph schema initialized (6 tables)", .{});
+}
 
 pub fn main() !void {
     var gpa = std.heap.DebugAllocator(.{}){};
@@ -34,6 +56,10 @@ pub fn main() !void {
     std.log.info("Connection pool initialized: min={d}, max={d}, engine={s}, tls={}", .{
         config.pool.min_size, config.pool.max_size, config.default_engine, config.tls.enforce,
     });
+
+    initKnowledgeGraphSchema(&pool) catch |err| {
+        std.log.warn("KG schema init failed (will be retried on first use): {s}", .{@errorName(err)});
+    };
 
     if (config.server.stdio) {
         std.log.info("Running in stdio mode", .{});

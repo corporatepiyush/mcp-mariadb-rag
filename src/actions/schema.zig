@@ -119,20 +119,15 @@ pub fn createTable(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value)
     const cols = mod.getArrayParam(args, "columns") orelse return mod.errPayload("Missing 'columns' parameter");
     validation.validateIdentifier(table) catch return mod.errPayload("Invalid table name");
 
-    // Per-call "engine" override, else the server default (TidesDB).
-    const engine = mod.getStringParam(args, "engine") orelse conn.defaultEngine();
-    validation.validateIdentifier(engine) catch return mod.errPayload("Invalid engine name");
-
-    return execBuilt(allocator, conn, "CREATE TABLE", "table", table, writeCreateTable, .{ table, cols, engine });
+    return execBuilt(allocator, conn, "CREATE TABLE", "table", table, writeCreateTable, .{ table, cols });
 }
 
-fn writeCreateTable(w: *Writer, table: []const u8, cols: Array, engine: []const u8) !void {
+fn writeCreateTable(w: *Writer, table: []const u8, cols: Array) !void {
     try w.writeAll("CREATE TABLE ");
     try validation.writeQuotedIdent(w, table);
     try w.writeAll(" (");
     try writeColumnList(w, cols);
-    try w.writeAll(") ENGINE=");
-    try w.writeAll(engine);
+    try w.writeAll(") ENGINE=TidesDB WRITE_BUFFER_SIZE=268435456");
 }
 
 pub fn dropTable(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
@@ -253,8 +248,8 @@ test "writeCreateTable emits quoted ident, columns, and ENGINE clause" {
 
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings(
-        "CREATE TABLE `t` (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=TidesDB",
-        try renderSql(&buf, writeCreateTable, .{ "t", cols, "TidesDB" }),
+        "CREATE TABLE `t` (id INT PRIMARY KEY, name VARCHAR(50)) ENGINE=TidesDB WRITE_BUFFER_SIZE=268435456",
+        try renderSql(&buf, writeCreateTable, .{ "t", cols }),
     );
 }
 

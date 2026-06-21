@@ -4,6 +4,7 @@ const json = @import("../json.zig");
 const schema = @import("schema.zig");
 const query = @import("query.zig");
 const stubs = @import("stubs.zig");
+const kg = @import("kg.zig");
 
 const Value = std.json.Value;
 const Writer = std.Io.Writer;
@@ -64,9 +65,27 @@ pub const registry = std.StaticStringMap(Handler).initComptime(.{
     .{ "revoke_privileges", stubs.notImpl },
     .{ "show_locks", stubs.notImpl },
     .{ "show_transaction_isolation", stubs.notImpl },
-    .{ "vector_search", stubs.notImpl },
-    .{ "fulltext_search", stubs.notImpl },
+    .{ "vector_search", kg.vectorSearch },
+    .{ "bfs_path", kg.bfsPath },
+    .{ "fulltext_search", kg.fulltextSearch },
     .{ "list_fulltext_indexes", stubs.notImpl },
+    .{ "create_entities", kg.createEntities },
+    .{ "create_relations", kg.createRelations },
+    .{ "delete_entities", kg.deleteEntities },
+    .{ "delete_relations", kg.deleteRelation },
+    .{ "add_observations", kg.addObservations },
+    .{ "delete_observations", kg.deleteObservations },
+    .{ "read_graph", kg.readGraph },
+    .{ "search_nodes", kg.searchNodes },
+    .{ "open_nodes", kg.openNodes },
+    .{ "get_entity_stats", kg.getEntityStats },
+    .{ "get_relation_stats", kg.getRelationStats },
+    .{ "search_relations", kg.searchRelations },
+    .{ "get_neighbors", kg.getNeighbors },
+    .{ "get_entity_degree", kg.getEntityDegree },
+    .{ "get_graph_statistics", kg.getGraphStatistics },
+    .{ "upsert_vector_embedding", kg.upsertVectorEmbedding },
+    .{ "delete_vector_embedding", kg.deleteVectorEmbedding },
 });
 
 const write_names = std.StaticStringMap(void).initComptime(.{
@@ -77,6 +96,9 @@ const write_names = std.StaticStringMap(void).initComptime(.{
     .{"truncate_table"}, .{"add_column"},  .{"drop_column"},      .{"rename_column"},
     .{"alter_column_type"}, .{"rename_table"}, .{"create_user"},  .{"drop_user"},
     .{"grant_privileges"}, .{"revoke_privileges"},
+    .{"create_entities"}, .{"create_relations"}, .{"delete_entities"},
+    .{"delete_relations"}, .{"add_observations"}, .{"delete_observations"},
+    .{"upsert_vector_embedding"}, .{"delete_vector_embedding"},
 });
 
 pub fn isWriteTool(name: []const u8) bool {
