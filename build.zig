@@ -42,10 +42,10 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
 
     // ---- unit + integration tests ----
-    // `src/tests.zig` aggregates every module so all `test` blocks are pulled
+    // `tests.zig` at the project root aggregates every module so all `test` blocks are pulled
     // into one binary. DB-dependent tests gate themselves on $DATABASE_URL.
     const test_mod = b.createModule(.{
-        .root_source_file = b.path("src/tests.zig"),
+        .root_source_file = b.path("tests.zig"),
         .target = target,
         .optimize = optimize,
     });

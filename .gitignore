@@ -4,3 +4,4 @@ zig-out/
 *.obj
 *.dSYM/
 .DS_Store
+Agent.md
