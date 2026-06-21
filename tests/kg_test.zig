@@ -19,6 +19,20 @@ fn parseJson(allocator: std.mem.Allocator, src: []const u8) Value {
     return parsed.value;
 }
 
+/// Build an `upsert_vector_embedding` args JSON string with a full 384-dim
+/// embedding (every component set to `fill`), matching the `VECTOR(384)` schema.
+fn vectorArgs(allocator: std.mem.Allocator, id: []const u8, entity: []const u8, text: []const u8, fill: f32) ![]u8 {
+    var aw = Writer.Allocating.init(allocator);
+    const w = &aw.writer;
+    try w.print("{{\"id\":\"{s}\",\"entityName\":\"{s}\",\"textContent\":\"{s}\",\"vector\":[", .{ id, entity, text });
+    for (0..384) |i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{d}", .{fill});
+    }
+    try w.writeAll("]}");
+    return aw.toOwnedSlice();
+}
+
 fn createTables(conn: *pool_mod.PooledConnection) void {
     inline for (.{
         schema.writeCreateEntity,
@@ -64,20 +78,18 @@ test "kg_integration: create entity and read it back" {
     dropTables(&conn);
     createTables(&conn);
 
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
     const name = "test_entity_1";
     const etype = "test_type";
     const obs = &[_][]const u8{};
-    const obs_json = try graph.observationsToJson(testing.allocator, obs);
-    defer testing.allocator.free(obs_json);
+    const obs_json = try graph.observationsToJson(a, obs);
 
     var buf: [1024]u8 = undefined;
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ name, etype, obs_json }));
-    const result = try conn.query(testing.allocator, try renderSql(&buf, graph.writeGetEntity, .{name}));
-    defer {
-        if (result.rows) |r| testing.allocator.free(r);
-        if (result.column_names) |c| testing.allocator.free(c);
-        if (result.column_kinds) |k| testing.allocator.free(k);
-    }
+    const result = try conn.query(a, try renderSql(&buf, graph.writeGetEntity, .{name}));
 
     try testing.expectEqual(@as(u64, 1), result.num_rows);
     try testing.expectEqualStrings(etype, result.rows.?[0].values[0].?);
@@ -106,14 +118,12 @@ test "kg_integration: insert relation and search" {
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "B", "type2", obs_json }));
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertRelation, .{ "A", "knows", "B" }));
 
-    const result = try conn.query(testing.allocator, try renderSql(&buf, graph.writeSearchRelations, .{
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try conn.query(arena.allocator(), try renderSql(&buf, graph.writeSearchRelations, .{
         @as(?[]const u8, "A"), @as(?[]const u8, null), @as(?[]const u8, null),
     }));
-    defer {
-        if (result.rows) |r| testing.allocator.free(r);
-        if (result.column_names) |c| testing.allocator.free(c);
-        if (result.column_kinds) |k| testing.allocator.free(k);
-    }
 
     try testing.expectEqual(@as(u64, 1), result.num_rows);
     if (result.rows) |rows| {
@@ -147,12 +157,10 @@ test "kg_integration: entity degree" {
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertRelation, .{ "X", "e", "Y" }));
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertRelation, .{ "X", "f", "Y" }));
 
-    const result = try conn.query(testing.allocator, try renderSql(&buf, graph.writeDegree, .{ "X", types.Direction.out }));
-    defer {
-        if (result.rows) |r| testing.allocator.free(r);
-        if (result.column_names) |c| testing.allocator.free(c);
-        if (result.column_kinds) |k| testing.allocator.free(k);
-    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try conn.query(arena.allocator(), try renderSql(&buf, graph.writeDegree, .{ "X", types.Direction.out }));
 
     try testing.expectEqual(@as(u64, 1), result.num_rows);
     try testing.expectEqualStrings("2", result.rows.?[0].values[0].?);
@@ -180,12 +188,10 @@ test "kg_integration: count entities" {
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "C1", "t", obs_json }));
     _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "C2", "t", obs_json }));
 
-    const result = try conn.query(testing.allocator, try renderSql(&buf, graph.writeCountEntities, .{}));
-    defer {
-        if (result.rows) |r| testing.allocator.free(r);
-        if (result.column_names) |c| testing.allocator.free(c);
-        if (result.column_kinds) |k| testing.allocator.free(k);
-    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try conn.query(arena.allocator(), try renderSql(&buf, graph.writeCountEntities, .{}));
 
     try testing.expectEqual(@as(u64, 1), result.num_rows);
     try testing.expectEqualStrings("2", result.rows.?[0].values[0].?);
@@ -382,11 +388,13 @@ test "kg_integration: vector upsert by string id replaces in place" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    const v1 = "{\"id\":\"vec1\",\"entityName\":\"Alice\",\"textContent\":\"hello\",\"vector\":[0.1,0.2,0.3]}";
+    // The schema's VECTOR(384) column requires exactly 384 dimensions, so build
+    // the args JSON with a full-length embedding rather than a toy 3-vector.
+    const v1 = try vectorArgs(a, "vec1", "Alice", "hello", 0.1);
     try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v1)).is_error);
 
     // Same id again — REPLACE must keep a single row rather than collide on id=0.
-    const v2 = "{\"id\":\"vec1\",\"entityName\":\"Alice\",\"textContent\":\"updated\",\"vector\":[0.4,0.5,0.6]}";
+    const v2 = try vectorArgs(a, "vec1", "Alice", "updated", 0.4);
     try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v2)).is_error);
 
     const cnt = try conn.query(a, "SELECT COUNT(*) FROM `rag_vector_embedding`");

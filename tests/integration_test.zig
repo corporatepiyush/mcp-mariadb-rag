@@ -41,12 +41,13 @@ test "integration: connect and run SELECT 1" {
     var conn = try pool.acquire();
     defer conn.deinit();
 
-    const result = try conn.query(testing.allocator, "SELECT 1 AS one");
-    defer {
-        if (result.rows) |rows| testing.allocator.free(rows);
-        if (result.column_names) |names| testing.allocator.free(names);
-        if (result.column_kinds) |kinds| testing.allocator.free(kinds);
-    }
+    // `query` allocates every row value / column name from the passed allocator
+    // (the real server hands it a per-request arena). Use an arena here so all of
+    // it is reclaimed at once instead of leaking the inner allocations.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try conn.query(arena.allocator(), "SELECT 1 AS one");
 
     try testing.expect(result.rows != null);
     try testing.expectEqual(@as(usize, 1), result.num_fields);
@@ -84,12 +85,10 @@ test "integration: execute INSERT then SELECT back" {
     const affected = try conn.execute("INSERT INTO _mcp_test VALUES (1, 'hello'), (2, 'world')");
     try testing.expectEqual(@as(u64, 2), affected);
 
-    const result = try conn.query(testing.allocator, "SELECT * FROM _mcp_test ORDER BY id");
-    defer {
-        if (result.rows) |rows| testing.allocator.free(rows);
-        if (result.column_names) |names| testing.allocator.free(names);
-        if (result.column_kinds) |kinds| testing.allocator.free(kinds);
-    }
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const result = try conn.query(arena.allocator(), "SELECT * FROM _mcp_test ORDER BY id");
 
     try testing.expectEqual(@as(u64, 2), result.num_rows);
     if (result.rows) |rows| {
@@ -144,11 +143,16 @@ test "integration: handleRequest initialize roundtrip" {
     };
     defer cfg.deinit(testing.allocator);
 
-    const resp = server.handleRequest(io, testing.allocator,
+    // handleRequest allocates the response (and intermediate scratch) from the
+    // passed allocator; the live server gives it a per-request arena, so do the
+    // same here rather than leaking those allocations.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const resp = server.handleRequest(io, arena.allocator(),
         "{\"method\":\"tools/call\",\"params\":{\"name\":\"list_tables\"},\"id\":1}",
         &pool, &cfg
     ) orelse return error.TestFailed;
-    defer testing.allocator.free(resp);
 
     // With a real DB, this should succeed (not return Pool error)
     try testing.expect(!std.mem.containsAtLeast(u8, resp, 1, "-32001"));

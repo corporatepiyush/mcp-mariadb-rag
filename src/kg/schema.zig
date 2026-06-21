@@ -122,9 +122,12 @@ pub fn writeCreateVectorEmbedding(w: *Writer) !void {
     // treat it as text), so it is a VARCHAR PRIMARY KEY — not an AUTO_INCREMENT
     // BIGINT. That makes `REPLACE INTO ... (id, ...)` a true upsert-by-id; with a
     // BIGINT key the string id coerced to 0 and every row collided.
+    //
+    // Width is 63 (not larger) so the utf8mb4 key stays within TidesDB's 255-byte
+    // max key length: 63 * 4 = 252 bytes. This matches the other key columns.
     try w.writeAll(
         " (\n"
-        ++ "    id VARCHAR(128) NOT NULL PRIMARY KEY,\n"
+        ++ "    id VARCHAR(63) NOT NULL PRIMARY KEY,\n"
         ++ "    entity_name VARCHAR(63) NOT NULL,\n"
         ++ "    text_content TEXT NOT NULL,\n"
         ++ "    embedding VECTOR(384) NOT NULL,\n"
@@ -253,7 +256,7 @@ test "writeCreateVectorEmbedding" {
     try writeCreateVectorEmbedding(&w);
     try std.testing.expectEqualStrings(
         \\CREATE TABLE IF NOT EXISTS `rag_vector_embedding` (
-        \\    id VARCHAR(128) NOT NULL PRIMARY KEY,
+        \\    id VARCHAR(63) NOT NULL PRIMARY KEY,
         \\    entity_name VARCHAR(63) NOT NULL,
         \\    text_content TEXT NOT NULL,
         \\    embedding VECTOR(384) NOT NULL,
@@ -295,7 +298,7 @@ test "writeCreateVectorEmbedding keys on a VARCHAR id for upsert-by-id" {
     var w = Writer.fixed(&buf);
     try writeCreateVectorEmbedding(&w);
     const result = w.buffered();
-    try std.testing.expect(std.mem.indexOf(u8, result, "id VARCHAR(128) NOT NULL PRIMARY KEY") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "id VARCHAR(63) NOT NULL PRIMARY KEY") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "AUTO_INCREMENT") == null);
 }
 
