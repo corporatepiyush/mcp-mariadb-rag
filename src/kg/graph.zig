@@ -44,6 +44,20 @@ fn writeSqlLiteral(w: *Writer, s: []const u8) !void {
     try w.writeByte('\'');
 }
 
+/// Write a `LIKE '%<query>%'` substring (contains) pattern as a single escaped
+/// literal.
+///
+/// MariaDB's `||` is *logical OR* by default (string concatenation requires the
+/// non-default `PIPES_AS_CONCAT`/ANSI sql_mode), so the pattern must be built as
+/// one literal — `LIKE '%' || q || '%'` would silently evaluate to `LIKE 0`.
+/// The query is escaped for the string-literal context; `%`/`_` inside it keep
+/// their wildcard meaning, preserving the original substring-search intent.
+fn writeLikeContains(w: *Writer, query: []const u8) !void {
+    try w.writeAll("LIKE '%");
+    try validation.writeEscapedLiteral(w, query);
+    try w.writeAll("%'");
+}
+
 // ── Types ─────────────────────────────────────────────────────────────
 
 /// Row type for batch entity inserts, shared between graph.zig and kg.zig.
@@ -93,6 +107,19 @@ fn parseObservationsJson(allocator: Allocator, json_str: []const u8) ![]const []
         result[i] = try allocator.dupe(u8, item.string);
     }
     return result;
+}
+
+/// `SELECT name, entity_type, observations FROM rag_entity WHERE name IN (<names>)`
+///
+/// Batch form of `writeGetEntity`: fetches many entities in one round-trip.
+/// Rows come back in arbitrary order, so callers that need request order should
+/// index the result by `name`. Caller must guarantee `names.len > 0`.
+pub fn writeGetEntitiesByNames(w: *Writer, names: []const []const u8) !void {
+    try w.writeAll("SELECT name, entity_type, observations FROM ");
+    try validation.writeQuotedIdent(w, schema.entity_table);
+    try w.writeAll(" WHERE name IN (");
+    try writeNameList(w, names);
+    try w.writeByte(')');
 }
 
 /// `SELECT 1 FROM rag_entity WHERE name = '<name>'`
@@ -218,7 +245,8 @@ pub fn writeInsertRelation(w: *Writer, from: []const u8, relation_type: []const 
 
 /// Multi-row batch INSERT for relations.
 /// `INSERT INTO rag_relation (from_entity, relation_type, to_entity) VALUES (..), (..)`
-pub fn writeInsertRelations(w: *Writer, relations: []const struct { from: []const u8, relation_type: []const u8, to: []const u8 }) !void {
+/// Caller must guarantee `relations.len > 0` (an empty list yields invalid SQL).
+pub fn writeInsertRelations(w: *Writer, relations: []const types.Relation) !void {
     try w.writeAll("INSERT INTO ");
     try validation.writeQuotedIdent(w, schema.relation_table);
     try w.writeAll(" (from_entity, relation_type, to_entity) VALUES ");
@@ -294,6 +322,37 @@ pub fn writeInsertObservations(
     }
 }
 
+/// Whether any entity in the set carries at least one observation. Callers use
+/// this to skip emitting an empty `writeAllEntityObservations` statement.
+pub fn anyObservations(entities: []const types.Entity) bool {
+    for (entities) |e| {
+        if (e.observations.len > 0) return true;
+    }
+    return false;
+}
+
+/// Single multi-row INSERT carrying every (entity_name, content) pair across all
+/// entities, collapsing what was previously one round-trip per entity into one.
+/// Caller must guard with `anyObservations` — emitting this for a set with no
+/// observations yields a trailing-`VALUES` syntax error.
+pub fn writeAllEntityObservations(w: *Writer, entities: []const types.Entity) !void {
+    try w.writeAll("INSERT INTO ");
+    try validation.writeQuotedIdent(w, schema.observation_table);
+    try w.writeAll(" (entity_name, content) VALUES");
+    var first = true;
+    for (entities) |e| {
+        for (e.observations) |content| {
+            if (!first) try w.writeByte(',');
+            first = false;
+            try w.writeByte('(');
+            try writeSqlLiteral(w, e.name);
+            try w.writeByte(',');
+            try writeSqlLiteral(w, content);
+            try w.writeByte(')');
+        }
+    }
+}
+
 // ── Read operations ───────────────────────────────────────────────────
 
 /// `SELECT name, entity_type, observations FROM rag_entity [WHERE entity_type = '<t>'] [LIMIT <n>] [OFFSET <n>]`
@@ -331,11 +390,11 @@ pub fn writeRelationsForEntitySet(w: *Writer, names: []const []const u8) !void {
 pub fn writeSearchEntities(w: *Writer, query: []const u8, filter_type: ?[]const u8, limit: ?u64, offset: ?u64) !void {
     try w.writeAll("SELECT name, entity_type, observations FROM ");
     try validation.writeQuotedIdent(w, schema.entity_table);
-    try w.writeAll(" WHERE (name LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%' OR entity_type LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%')");
+    try w.writeAll(" WHERE (name ");
+    try writeLikeContains(w, query);
+    try w.writeAll(" OR entity_type ");
+    try writeLikeContains(w, query);
+    try w.writeByte(')');
     if (filter_type) |ft| {
         if (ft.len > 0) {
             try w.writeAll(" AND entity_type = ");
@@ -384,6 +443,16 @@ pub fn writeCountEntities(w: *Writer) !void {
 pub fn writeCountRelations(w: *Writer) !void {
     try w.writeAll("SELECT COUNT(*) FROM ");
     try validation.writeQuotedIdent(w, schema.relation_table);
+}
+
+/// Combined entity + relation counts in a single round-trip.
+/// `SELECT (SELECT COUNT(*) FROM rag_entity), (SELECT COUNT(*) FROM rag_relation)`
+pub fn writeGraphStatistics(w: *Writer) !void {
+    try w.writeAll("SELECT (SELECT COUNT(*) FROM ");
+    try validation.writeQuotedIdent(w, schema.entity_table);
+    try w.writeAll("), (SELECT COUNT(*) FROM ");
+    try validation.writeQuotedIdent(w, schema.relation_table);
+    try w.writeByte(')');
 }
 
 /// `SELECT entity_type, COUNT(*) as cnt FROM rag_entity GROUP BY entity_type ORDER BY cnt DESC`
@@ -501,19 +570,19 @@ pub fn writeBfsExpand(w: *Writer, names: []const []const u8, direction: types.Di
 pub fn writeFulltextSearch(w: *Writer, query: []const u8, limit: u64) !void {
     try w.writeAll("SELECT DISTINCT e.name, e.entity_type, e.observations FROM ");
     try validation.writeQuotedIdent(w, schema.entity_table);
-    try w.writeAll(" e WHERE e.name LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%' OR e.entity_type LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%' OR e.observations LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%' UNION SELECT DISTINCT e.name, e.entity_type, e.observations FROM ");
+    try w.writeAll(" e WHERE e.name ");
+    try writeLikeContains(w, query);
+    try w.writeAll(" OR e.entity_type ");
+    try writeLikeContains(w, query);
+    try w.writeAll(" OR e.observations ");
+    try writeLikeContains(w, query);
+    try w.writeAll(" UNION SELECT DISTINCT e.name, e.entity_type, e.observations FROM ");
     try validation.writeQuotedIdent(w, schema.entity_table);
     try w.writeAll(" e JOIN ");
     try validation.writeQuotedIdent(w, schema.observation_table);
-    try w.writeAll(" o ON o.entity_name = e.name WHERE o.content LIKE '%' || ");
-    try writeSqlLiteral(w, query);
-    try w.writeAll(" || '%' LIMIT ");
+    try w.writeAll(" o ON o.entity_name = e.name WHERE o.content ");
+    try writeLikeContains(w, query);
+    try w.writeAll(" LIMIT ");
     try w.print("{d}", .{limit});
 }
 
@@ -648,7 +717,7 @@ test "writeReadEntities with limit and offset" {
 test "writeSearchEntities" {
     var buf: [2048]u8 = undefined;
     try testing.expectEqualStrings(
-        "SELECT name, entity_type, observations FROM `rag_entity` WHERE (name LIKE '%' || 'alice' || '%' OR entity_type LIKE '%' || 'alice' || '%') ORDER BY name",
+        "SELECT name, entity_type, observations FROM `rag_entity` WHERE (name LIKE '%alice%' OR entity_type LIKE '%alice%') ORDER BY name",
         try renderSql(&buf, writeSearchEntities, .{ "alice", @as(?[]const u8, null), @as(?u64, null), @as(?u64, null) }),
     );
 }
@@ -828,7 +897,98 @@ test "writeFulltextSearch" {
     var buf: [4096]u8 = undefined;
     const result = try renderSql(&buf, writeFulltextSearch, .{ "alice", 10 });
     try testing.expect(std.mem.indexOf(u8, result, "SELECT DISTINCT e.name") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "LIKE '%' || 'alice' || '%'") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "LIKE '%alice%'") != null);
+    // No bare `||` — MariaDB would read it as logical OR by default.
+    try testing.expect(std.mem.indexOf(u8, result, "||") == null);
     try testing.expect(std.mem.indexOf(u8, result, "JOIN `rag_observation` o ON o.entity_name = e.name") != null);
     try testing.expect(std.mem.indexOf(u8, result, "LIMIT 10") != null);
+}
+
+// -- Concat-bug regression: search must not emit MariaDB's logical-OR `||` -----
+
+test "writeSearchEntities builds a single LIKE literal, never `||`" {
+    var buf: [2048]u8 = undefined;
+    const result = try renderSql(&buf, writeSearchEntities, .{ "alice", @as(?[]const u8, null), @as(?u64, null), @as(?u64, null) });
+    try testing.expect(std.mem.indexOf(u8, result, "name LIKE '%alice%'") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "entity_type LIKE '%alice%'") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "||") == null);
+}
+
+test "writeSearchEntities escapes quotes inside the LIKE pattern" {
+    var buf: [2048]u8 = undefined;
+    const result = try renderSql(&buf, writeSearchEntities, .{ "O'Brien", @as(?[]const u8, null), @as(?u64, null), @as(?u64, null) });
+    try testing.expect(std.mem.indexOf(u8, result, "LIKE '%O''Brien%'") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "||") == null);
+}
+
+test "writeFulltextSearch escapes quotes and avoids `||`" {
+    var buf: [4096]u8 = undefined;
+    const result = try renderSql(&buf, writeFulltextSearch, .{ "a'b", 5 });
+    try testing.expect(std.mem.indexOf(u8, result, "LIKE '%a''b%'") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "||") == null);
+}
+
+// -- Batch helpers -----------------------------------------------------------
+
+test "writeInsertRelations batches multiple rows" {
+    var buf: [2048]u8 = undefined;
+    const rels = [_]types.Relation{
+        .{ .from = "A", .to = "B", .relation_type = "knows" },
+        .{ .from = "B", .to = "C", .relation_type = "likes" },
+    };
+    try testing.expectEqualStrings(
+        "INSERT INTO `rag_relation` (from_entity, relation_type, to_entity) VALUES ('A','knows','B'), ('B','likes','C')",
+        try renderSql(&buf, writeInsertRelations, .{&rels}),
+    );
+}
+
+test "writeInsertRelations escapes literals" {
+    var buf: [2048]u8 = undefined;
+    const rels = [_]types.Relation{.{ .from = "O'Hara", .to = "B", .relation_type = "r" }};
+    const result = try renderSql(&buf, writeInsertRelations, .{&rels});
+    try testing.expect(std.mem.indexOf(u8, result, "'O''Hara'") != null);
+}
+
+test "writeGetEntitiesByNames" {
+    var buf: [1024]u8 = undefined;
+    try testing.expectEqualStrings(
+        "SELECT name, entity_type, observations FROM `rag_entity` WHERE name IN ('A', 'B', 'C')",
+        try renderSql(&buf, writeGetEntitiesByNames, .{&[_][]const u8{ "A", "B", "C" }}),
+    );
+}
+
+test "anyObservations" {
+    const none = [_]types.Entity{
+        .{ .name = "A", .entity_type = "t", .observations = &.{} },
+        .{ .name = "B", .entity_type = "t", .observations = &.{} },
+    };
+    try testing.expect(!anyObservations(&none));
+
+    const some = [_]types.Entity{
+        .{ .name = "A", .entity_type = "t", .observations = &.{} },
+        .{ .name = "B", .entity_type = "t", .observations = &.{"obs"} },
+    };
+    try testing.expect(anyObservations(&some));
+    try testing.expect(!anyObservations(&.{}));
+}
+
+test "writeAllEntityObservations collapses pairs into one statement" {
+    var buf: [2048]u8 = undefined;
+    const entities = [_]types.Entity{
+        .{ .name = "A", .entity_type = "t", .observations = &.{ "a1", "a2" } },
+        .{ .name = "B", .entity_type = "t", .observations = &.{} }, // skipped
+        .{ .name = "C", .entity_type = "t", .observations = &.{"c1"} },
+    };
+    try testing.expectEqualStrings(
+        "INSERT INTO `rag_observation` (entity_name, content) VALUES('A','a1'),('A','a2'),('C','c1')",
+        try renderSql(&buf, writeAllEntityObservations, .{&entities}),
+    );
+}
+
+test "writeGraphStatistics single round-trip query" {
+    var buf: [512]u8 = undefined;
+    try testing.expectEqualStrings(
+        "SELECT (SELECT COUNT(*) FROM `rag_entity`), (SELECT COUNT(*) FROM `rag_relation`)",
+        try renderSql(&buf, writeGraphStatistics, .{}),
+    );
 }

@@ -81,7 +81,8 @@ pub fn writeCreateRelation(w: *Writer) !void {
         ++ "    to_entity VARCHAR(63) NOT NULL,\n"
         ++ "    weight REAL DEFAULT 1.0,\n"
         ++ "    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n"
-        ++ "    UNIQUE INDEX idx_rel (from_entity, relation_type, to_entity)\n"
+        ++ "    UNIQUE INDEX idx_rel (from_entity, relation_type, to_entity),\n"
+        ++ "    INDEX idx_to (to_entity)\n"
         ++ ") ENGINE=TidesDB WRITE_BUFFER_SIZE=268435456",
     );
 }
@@ -117,9 +118,13 @@ pub fn writeCreateGraphStat(w: *Writer) !void {
 pub fn writeCreateVectorEmbedding(w: *Writer) !void {
     try w.writeAll("CREATE TABLE IF NOT EXISTS ");
     try writeIdent(w, vector_embedding_table);
+    // `id` is a caller-supplied string key (the upsert/search/delete handlers all
+    // treat it as text), so it is a VARCHAR PRIMARY KEY — not an AUTO_INCREMENT
+    // BIGINT. That makes `REPLACE INTO ... (id, ...)` a true upsert-by-id; with a
+    // BIGINT key the string id coerced to 0 and every row collided.
     try w.writeAll(
         " (\n"
-        ++ "    id BIGINT AUTO_INCREMENT PRIMARY KEY,\n"
+        ++ "    id VARCHAR(128) NOT NULL PRIMARY KEY,\n"
         ++ "    entity_name VARCHAR(63) NOT NULL,\n"
         ++ "    text_content TEXT NOT NULL,\n"
         ++ "    embedding VECTOR(384) NOT NULL,\n"
@@ -200,7 +205,8 @@ test "writeCreateRelation" {
         \\    to_entity VARCHAR(63) NOT NULL,
         \\    weight REAL DEFAULT 1.0,
         \\    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        \\    UNIQUE INDEX idx_rel (from_entity, relation_type, to_entity)
+        \\    UNIQUE INDEX idx_rel (from_entity, relation_type, to_entity),
+        \\    INDEX idx_to (to_entity)
         \\) ENGINE=TidesDB WRITE_BUFFER_SIZE=268435456
     ,
         w.buffered(),
@@ -247,7 +253,7 @@ test "writeCreateVectorEmbedding" {
     try writeCreateVectorEmbedding(&w);
     try std.testing.expectEqualStrings(
         \\CREATE TABLE IF NOT EXISTS `rag_vector_embedding` (
-        \\    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+        \\    id VARCHAR(128) NOT NULL PRIMARY KEY,
         \\    entity_name VARCHAR(63) NOT NULL,
         \\    text_content TEXT NOT NULL,
         \\    embedding VECTOR(384) NOT NULL,
@@ -271,6 +277,26 @@ test "writeAll concatenates six statements with ; separators" {
     try std.testing.expectEqual(@as(usize, 6), std.mem.count(u8, result, "CREATE TABLE IF NOT EXISTS"));
     try std.testing.expect(std.mem.indexOf(u8, result, "ENGINE=TidesDB") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "VECTOR INDEX") != null);
+}
+
+test "writeCreateRelation includes reverse-traversal index idx_to" {
+    var buf: [1024]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try writeCreateRelation(&w);
+    const result = w.buffered();
+    // Composite index serves from_entity (leftmost prefix); idx_to serves
+    // incoming/reverse lookups that filter on to_entity alone.
+    try std.testing.expect(std.mem.indexOf(u8, result, "UNIQUE INDEX idx_rel (from_entity, relation_type, to_entity)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "INDEX idx_to (to_entity)") != null);
+}
+
+test "writeCreateVectorEmbedding keys on a VARCHAR id for upsert-by-id" {
+    var buf: [1024]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try writeCreateVectorEmbedding(&w);
+    const result = w.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, result, "id VARCHAR(128) NOT NULL PRIMARY KEY") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "AUTO_INCREMENT") == null);
 }
 
 test "allTableNames returns six names" {

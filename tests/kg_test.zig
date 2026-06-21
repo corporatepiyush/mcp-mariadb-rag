@@ -4,12 +4,19 @@ const pool_mod = @import("../src/pool.zig");
 const schema = @import("../src/kg/schema.zig");
 const graph = @import("../src/kg/graph.zig");
 const types = @import("../src/kg/types.zig");
+const kg = @import("../src/actions/kg.zig");
 
 const Writer = std.Io.Writer;
+const Value = std.json.Value;
 
 fn dbUrl() ?[]const u8 {
     const env = std.c.getenv("DATABASE_URL");
     return if (env) |ptr| std.mem.sliceTo(ptr, 0) else null;
+}
+
+fn parseJson(allocator: std.mem.Allocator, src: []const u8) Value {
+    const parsed = std.json.parseFromSlice(Value, allocator, src, .{}) catch @panic("bad JSON");
+    return parsed.value;
 }
 
 fn createTables(conn: *pool_mod.PooledConnection) void {
@@ -182,4 +189,214 @@ test "kg_integration: count entities" {
 
     try testing.expectEqual(@as(u64, 1), result.num_rows);
     try testing.expectEqualStrings("2", result.rows.?[0].values[0].?);
+}
+
+// ── Handler-level integration tests (new v0.3.0 batch paths) ──────────
+
+test "kg_integration: createEntities batches entities + observations" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const args = parseJson(a,
+        \\{"entities":[
+        \\  {"name":"Alice","entityType":"person","observations":["likes math","plays piano"]},
+        \\  {"name":"Bob","entityType":"person","observations":[]},
+        \\  {"name":"Carol","entityType":"robot","observations":["beeps"]}
+        \\]}
+    );
+    const res = kg.createEntities(io, a, &conn, args);
+    try testing.expect(!res.is_error);
+
+    var buf: [256]u8 = undefined;
+    const cnt = try conn.query(a, try renderSql(&buf, graph.writeCountEntities, .{}));
+    try testing.expectEqualStrings("3", cnt.rows.?[0].values[0].?);
+
+    // Observations: 2 (Alice) + 0 (Bob) + 1 (Carol) = 3 rows, one batched INSERT.
+    const obs = try conn.query(a, "SELECT COUNT(*) FROM `rag_observation`");
+    try testing.expectEqualStrings("3", obs.rows.?[0].values[0].?);
+}
+
+test "kg_integration: empty entities/relations rejected" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expect(kg.createEntities(io, a, &conn, parseJson(a, "{\"entities\":[]}")).is_error);
+    try testing.expect(kg.createRelations(io, a, &conn, parseJson(a, "{\"relations\":[]}")).is_error);
+}
+
+test "kg_integration: deleteEntities batch IN clause" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var buf: [1024]u8 = undefined;
+    inline for (.{ "D1", "D2", "D3" }) |name| {
+        _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ name, "t", "[]" }));
+    }
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const res = kg.deleteEntities(io, a, &conn, parseJson(a, "{\"names\":[\"D1\",\"D2\"]}"));
+    try testing.expect(!res.is_error);
+    try testing.expect(std.mem.indexOf(u8, res.text, "\"deleted\":2") != null);
+
+    var buf2: [256]u8 = undefined;
+    const cnt = try conn.query(a, try renderSql(&buf2, graph.writeCountEntities, .{}));
+    try testing.expectEqualStrings("1", cnt.rows.?[0].values[0].?);
+}
+
+test "kg_integration: openNodes skips missing names with valid JSON" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var buf: [1024]u8 = undefined;
+    // Only "Present" exists; "Missing" must be skipped without breaking JSON.
+    _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "Present", "t", "[]" }));
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // First name missing — previously produced `{"entities":[,{...}]}`.
+    const res = kg.openNodes(io, a, &conn, parseJson(a, "{\"names\":[\"Missing\",\"Present\"]}"));
+    try testing.expect(!res.is_error);
+
+    // The result must parse as valid JSON and contain exactly one entity.
+    const parsed = try std.json.parseFromSlice(Value, a, res.text, .{});
+    const entities = parsed.value.object.get("entities").?.array;
+    try testing.expectEqual(@as(usize, 1), entities.items.len);
+    try testing.expectEqualStrings("Present", entities.items[0].object.get("name").?.string);
+}
+
+test "kg_integration: getGraphStatistics single round-trip" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var buf: [1024]u8 = undefined;
+    _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "S1", "t", "[]" }));
+    _ = try conn.execute(try renderSql(&buf, graph.writeInsertEntity, .{ "S2", "t", "[]" }));
+    _ = try conn.execute(try renderSql(&buf, graph.writeInsertRelation, .{ "S1", "knows", "S2" }));
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const res = kg.getGraphStatistics(io, a, &conn, null);
+    try testing.expect(!res.is_error);
+    try testing.expect(std.mem.indexOf(u8, res.text, "\"entity_count\":2") != null);
+    try testing.expect(std.mem.indexOf(u8, res.text, "\"relation_count\":1") != null);
+}
+
+test "kg_integration: vector upsert by string id replaces in place" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const v1 = "{\"id\":\"vec1\",\"entityName\":\"Alice\",\"textContent\":\"hello\",\"vector\":[0.1,0.2,0.3]}";
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v1)).is_error);
+
+    // Same id again — REPLACE must keep a single row rather than collide on id=0.
+    const v2 = "{\"id\":\"vec1\",\"entityName\":\"Alice\",\"textContent\":\"updated\",\"vector\":[0.4,0.5,0.6]}";
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v2)).is_error);
+
+    const cnt = try conn.query(a, "SELECT COUNT(*) FROM `rag_vector_embedding`");
+    try testing.expectEqualStrings("1", cnt.rows.?[0].values[0].?);
+
+    const txt = try conn.query(a, "SELECT text_content FROM `rag_vector_embedding` WHERE id = 'vec1'");
+    try testing.expectEqualStrings("updated", txt.rows.?[0].values[0].?);
+
+    const del = kg.deleteVectorEmbedding(io, a, &conn, parseJson(a, "{\"id\":\"vec1\"}"));
+    try testing.expect(!del.is_error);
+    const cnt2 = try conn.query(a, "SELECT COUNT(*) FROM `rag_vector_embedding`");
+    try testing.expectEqualStrings("0", cnt2.rows.?[0].values[0].?);
 }

@@ -1,7 +1,6 @@
 const std = @import("std");
 const pool = @import("../pool.zig");
 const json = @import("../json.zig");
-const validation = @import("../validation.zig");
 const mod = @import("mod.zig");
 const graph = @import("../kg/graph.zig");
 const vector = @import("../kg/vector.zig");
@@ -15,21 +14,33 @@ const PooledConn = pool.PooledConnection;
 const Payload = mod.Payload;
 const Writer = std.Io.Writer;
 
-fn writeObservationsBatch(w: *Writer, entity_name: []const u8, contents: []const []const u8) !void {
-    try w.writeAll("INSERT INTO ");
-    try validation.writeQuotedIdent(w, schema.observation_table);
-    try w.writeAll(" (entity_name, content) VALUES");
-    for (contents, 0..) |content, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeAll(" ('");
-        try validation.writeEscapedLiteral(w, entity_name);
-        try w.writeByte('\'');
-        try w.writeByte(',');
-        try w.writeByte('\'');
-        try validation.writeEscapedLiteral(w, content);
-        try w.writeByte('\'');
-        try w.writeByte(')');
+/// Maximum embedding dimensionality (matches `VECTOR(384)` in the schema).
+const vector_dims = 384;
+
+/// Parse a JSON array of numbers into a fixed-capacity f32 buffer, returning the
+/// populated prefix. Accepts both float and integer JSON values. Errors if the
+/// array is longer than `vector_dims` or contains a non-number.
+fn parseVector(buf: *[vector_dims]f32, arr: std.json.Array) error{ TooLong, NotNumber }![]const f32 {
+    if (arr.items.len > vector_dims) return error.TooLong;
+    for (arr.items, 0..) |item, i| {
+        buf[i] = switch (item) {
+            .float => |f| @as(f32, @floatCast(f)),
+            .integer => |n| @as(f32, @floatFromInt(n)),
+            else => return error.NotNumber,
+        };
     }
+    return buf[0..arr.items.len];
+}
+
+/// Collect a JSON array of strings into an owned slice, erroring on any
+/// non-string element.
+fn stringArray(allocator: Allocator, arr: std.json.Array) error{ NotString, OutOfMemory }![]const []const u8 {
+    const out = try allocator.alloc([]const u8, arr.items.len);
+    for (arr.items, 0..) |item, i| {
+        if (item != .string) return error.NotString;
+        out[i] = item.string;
+    }
+    return out;
 }
 
 fn execBuilt(allocator: Allocator, conn: *PooledConn, comptime write_fn: anytype, args: anytype) !u64 {
@@ -42,12 +53,63 @@ fn writeJsonString(w: *Writer, s: []const u8) !void {
     try json.writeQuoted(w, s);
 }
 
+/// `{"name":..,"entityType":..,"observations":<raw>}`. `obs` is the raw JSON
+/// array text straight from the `observations` column.
+fn writeEntityObject(w: *Writer, name: []const u8, etype: []const u8, obs: []const u8) !void {
+    try w.writeAll("{\"name\":");
+    try writeJsonString(w, name);
+    try w.writeAll(",\"entityType\":");
+    try writeJsonString(w, etype);
+    try w.writeAll(",\"observations\":");
+    try w.writeAll(obs);
+    try w.writeByte('}');
+}
+
+/// `{"from":..,"relationType":..,"to":..}`.
+fn writeRelationObject(w: *Writer, from: []const u8, rtype: []const u8, to: []const u8) !void {
+    try w.writeAll("{\"from\":");
+    try writeJsonString(w, from);
+    try w.writeAll(",\"relationType\":");
+    try writeJsonString(w, rtype);
+    try w.writeAll(",\"to\":");
+    try writeJsonString(w, to);
+    try w.writeByte('}');
+}
+
+/// Entity row payload indexed by name when batch-fetching.
+const EntityRow = struct { entity_type: []const u8, observations: []const u8 };
+
+/// Fetch many entities by name in one round-trip, indexed by name. Replaces the
+/// previous one-`SELECT`-per-name loops in `openNodes` / `getNeighbors`.
+fn fetchEntitiesByName(
+    allocator: Allocator,
+    conn: *PooledConn,
+    names: []const []const u8,
+) !std.StringHashMapUnmanaged(EntityRow) {
+    var map: std.StringHashMapUnmanaged(EntityRow) = .empty;
+    if (names.len == 0) return map;
+    const sql = try mod.renderToOwned(allocator, graph.writeGetEntitiesByNames, .{names});
+    defer allocator.free(sql);
+    const result = try conn.query(allocator, sql);
+    const rows = result.rows orelse return map;
+    for (rows) |row| {
+        const nm = row.values[0] orelse continue;
+        try map.put(allocator, nm, .{
+            .entity_type = row.values[1] orelse "",
+            .observations = row.values[2] orelse "[]",
+        });
+    }
+    return map;
+}
+
 pub fn createEntities(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
     const entities_val = mod.getArrayParam(args, "entities") orelse
         return mod.errPayload("Missing 'entities' parameter");
 
     const entities = types.entitiesFromValue(allocator, Value{ .array = entities_val }) catch
         return mod.errPayload("Invalid entity format");
+
+    if (entities.len == 0) return mod.errPayload("Empty entities list");
 
     {
         var batch: std.ArrayList(graph.EntityInsertRow) = .empty;
@@ -64,13 +126,13 @@ pub fn createEntities(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
         _ = conn.execute(sql) catch return mod.errPayload("Create entity failed");
     }
 
-    for (entities) |entity| {
-        if (entity.observations.len > 0) {
-            const ins_sql = mod.renderToOwned(allocator, writeObservationsBatch, .{ entity.name, entity.observations }) catch
-                return mod.errPayload("Allocation error");
-            defer allocator.free(ins_sql);
-            _ = conn.execute(ins_sql) catch return mod.errPayload("Create observations failed");
-        }
+    // All observations across every entity go in a single multi-row INSERT
+    // rather than one round-trip per entity.
+    if (graph.anyObservations(entities)) {
+        const ins_sql = mod.renderToOwned(allocator, graph.writeAllEntityObservations, .{entities}) catch
+            return mod.errPayload("Allocation error");
+        defer allocator.free(ins_sql);
+        _ = conn.execute(ins_sql) catch return mod.errPayload("Create observations failed");
     }
 
     var aw = Writer.Allocating.init(allocator);
@@ -93,10 +155,11 @@ pub fn createRelations(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Va
     const relations = types.relationsFromValue(allocator, Value{ .array = relations_val }) catch
         return mod.errPayload("Invalid relation format");
 
-    for (relations) |rel| {
-        _ = execBuilt(allocator, conn, graph.writeInsertRelation, .{ rel.from, rel.relation_type, rel.to }) catch
-            return mod.errPayload("Create relation failed");
-    }
+    if (relations.len == 0) return mod.errPayload("Empty relations list");
+
+    // Single multi-row INSERT instead of one round-trip per relation.
+    _ = execBuilt(allocator, conn, graph.writeInsertRelations, .{relations}) catch
+        return mod.errPayload("Create relation failed");
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
@@ -109,24 +172,20 @@ pub fn deleteEntities(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     const names_val = mod.getArrayParam(args, "names") orelse
         return mod.errPayload("Missing 'names' parameter");
 
-    var names: std.ArrayList([]const u8) = .empty;
-    for (names_val.items) |item| {
-        if (item != .string) return mod.errPayload("Name must be a string");
-        names.append(allocator, item.string) catch return mod.errPayload("Allocation error");
-    }
+    const names = stringArray(allocator, names_val) catch |err| return switch (err) {
+        error.NotString => mod.errPayload("Name must be a string"),
+        error.OutOfMemory => mod.errPayload("Allocation error"),
+    };
 
-    if (names.items.len == 0) return mod.errPayload("Empty names list");
+    if (names.len == 0) return mod.errPayload("Empty names list");
 
-    for (names.items) |name| {
-        const sql = mod.renderToOwned(allocator, graph.writeDeleteEntity, .{name}) catch
-            return mod.errPayload("Allocation error");
-        defer allocator.free(sql);
-        _ = conn.execute(sql) catch return mod.errPayload("Delete failed");
-    }
+    // Single `DELETE ... WHERE name IN (...)` instead of one per name.
+    const affected = execBuilt(allocator, conn, graph.writeDeleteEntities, .{names}) catch
+        return mod.errPayload("Delete failed");
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
-    aw.writer.print("{{\"deleted\":{d}}}", .{names.items.len}) catch
+    aw.writer.print("{{\"deleted\":{d}}}", .{affected}) catch
         return mod.errPayload("Serialization error");
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
 }
@@ -151,12 +210,10 @@ pub fn addObservations(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Va
     const obs_val = mod.getArrayParam(args, "observations") orelse
         return mod.errPayload("Missing 'observations' parameter");
 
-    var contents: std.ArrayList([]const u8) = .empty;
-    for (obs_val.items) |item| {
-        if (item != .string) return mod.errPayload("Observation must be a string");
-        contents.append(allocator, item.string) catch return mod.errPayload("Allocation error");
-    }
-    const obs_slice = contents.items;
+    const obs_slice = stringArray(allocator, obs_val) catch |err| return switch (err) {
+        error.NotString => mod.errPayload("Observation must be a string"),
+        error.OutOfMemory => mod.errPayload("Allocation error"),
+    };
 
     if (obs_slice.len == 0) {
         var aw = Writer.Allocating.init(allocator);
@@ -166,7 +223,7 @@ pub fn addObservations(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Va
         return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
     }
 
-    const ins_sql = mod.renderToOwned(allocator, writeObservationsBatch, .{ name, obs_slice }) catch
+    const ins_sql = mod.renderToOwned(allocator, graph.writeInsertObservations, .{ name, obs_slice }) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(ins_sql);
     _ = conn.execute(ins_sql) catch return mod.errPayload("Add observations failed");
@@ -183,12 +240,10 @@ pub fn deleteObservations(_: Io, allocator: Allocator, conn: *PooledConn, args: 
     const obs_val = mod.getArrayParam(args, "observations") orelse
         return mod.errPayload("Missing 'observations' parameter");
 
-    var contents: std.ArrayList([]const u8) = .empty;
-    for (obs_val.items) |item| {
-        if (item != .string) return mod.errPayload("Observation must be a string");
-        contents.append(allocator, item.string) catch return mod.errPayload("Allocation error");
-    }
-    const obs_slice = contents.items;
+    const obs_slice = stringArray(allocator, obs_val) catch |err| return switch (err) {
+        error.NotString => mod.errPayload("Observation must be a string"),
+        error.OutOfMemory => mod.errPayload("Allocation error"),
+    };
 
     if (obs_slice.len == 0) {
         var aw = Writer.Allocating.init(allocator);
@@ -291,45 +346,36 @@ pub fn openNodes(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) P
     const names_val = mod.getArrayParam(args, "names") orelse
         return mod.errPayload("Missing 'names' parameter");
 
-    var names: std.ArrayList([]const u8) = .empty;
-    for (names_val.items) |item| {
-        if (item != .string) return mod.errPayload("Name must be a string");
-        names.append(allocator, item.string) catch return mod.errPayload("Allocation error");
-    }
+    const names = stringArray(allocator, names_val) catch |err| return switch (err) {
+        error.NotString => mod.errPayload("Name must be a string"),
+        error.OutOfMemory => mod.errPayload("Allocation error"),
+    };
 
-    if (names.items.len == 0) return mod.errPayload("Empty names list");
+    if (names.len == 0) return mod.errPayload("Empty names list");
+
+    // One round-trip for all requested entities; emit them in request order.
+    var emap = fetchEntitiesByName(allocator, conn, names) catch
+        return mod.errPayload("Query failed");
+    defer emap.deinit(allocator);
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
     w.writeAll("{\"entities\":[") catch return mod.errPayload("Serialization error");
 
-    const r_sql = mod.renderToOwned(allocator, graph.writeRelationsForEntitySet, .{names.items}) catch
-        return mod.errPayload("Allocation error");
-    defer allocator.free(r_sql);
-
-    for (names.items, 0..) |name, i| {
-        const sql = mod.renderToOwned(allocator, graph.writeGetEntity, .{name}) catch
-            return mod.errPayload("Allocation error");
-        defer allocator.free(sql);
-
-        const result = conn.query(allocator, sql) catch continue;
-        const rows = result.rows orelse continue;
-        if (rows.len == 0) continue;
-        const row = rows[0];
-        const etype = row.values[0] orelse "";
-        const eobs = row.values[1] orelse "[]";
-
-        if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
-        w.writeAll("{\"name\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(w, name) catch return mod.errPayload("Serialization error");
-        w.writeAll(",\"entityType\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(w, etype) catch return mod.errPayload("Serialization error");
-        w.writeAll(",\"observations\":") catch return mod.errPayload("Serialization error");
-        w.writeAll(eobs) catch return mod.errPayload("Serialization error");
-        w.writeByte('}') catch return mod.errPayload("Serialization error");
+    var first = true;
+    for (names) |name| {
+        const e = emap.get(name) orelse continue;
+        if (!first) w.writeByte(',') catch return mod.errPayload("Serialization error");
+        first = false;
+        writeEntityObject(w, name, e.entity_type, e.observations) catch
+            return mod.errPayload("Serialization error");
     }
     w.writeAll("],\"relations\":[") catch return mod.errPayload("Serialization error");
+
+    const r_sql = mod.renderToOwned(allocator, graph.writeRelationsForEntitySet, .{names}) catch
+        return mod.errPayload("Allocation error");
+    defer allocator.free(r_sql);
 
     const r_result = conn.query(allocator, r_sql) catch {
         w.writeAll("]}") catch return mod.errPayload("Serialization error");
@@ -338,13 +384,8 @@ pub fn openNodes(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) P
     if (r_result.rows) |r_rows| {
         for (r_rows, 0..) |row, i| {
             if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
-            w.writeAll("{\"from\":") catch return mod.errPayload("Serialization error");
-            writeJsonString(w, row.values[0] orelse "") catch return mod.errPayload("Serialization error");
-            w.writeAll(",\"relationType\":") catch return mod.errPayload("Serialization error");
-            writeJsonString(w, row.values[1] orelse "") catch return mod.errPayload("Serialization error");
-            w.writeAll(",\"to\":") catch return mod.errPayload("Serialization error");
-            writeJsonString(w, row.values[2] orelse "") catch return mod.errPayload("Serialization error");
-            w.writeByte('}') catch return mod.errPayload("Serialization error");
+            writeRelationObject(w, row.values[0] orelse "", row.values[1] orelse "", row.values[2] orelse "") catch
+                return mod.errPayload("Serialization error");
         }
     }
 
@@ -384,21 +425,20 @@ pub fn getNeighbors(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     const names_val = mod.getArrayParam(args, "names") orelse
         return mod.errPayload("Missing 'names' parameter");
 
-    var names: std.ArrayList([]const u8) = .empty;
-    for (names_val.items) |item| {
-        if (item != .string) return mod.errPayload("Name must be a string");
-        names.append(allocator, item.string) catch return mod.errPayload("Allocation error");
-    }
+    const names = stringArray(allocator, names_val) catch |err| return switch (err) {
+        error.NotString => mod.errPayload("Name must be a string"),
+        error.OutOfMemory => mod.errPayload("Allocation error"),
+    };
 
     const dir_str = mod.getStringParam(args, "direction");
     const dir = types.Direction.parse(dir_str);
 
     const sql = switch (dir) {
-        .out => mod.renderToOwned(allocator, graph.writeOutgoingRelations, .{names.items}) catch
+        .out => mod.renderToOwned(allocator, graph.writeOutgoingRelations, .{names}) catch
             return mod.errPayload("Allocation error"),
-        .incoming => mod.renderToOwned(allocator, graph.writeIncomingRelations, .{names.items}) catch
+        .incoming => mod.renderToOwned(allocator, graph.writeIncomingRelations, .{names}) catch
             return mod.errPayload("Allocation error"),
-        .both => mod.renderToOwned(allocator, graph.writeRelationsForEntitySet, .{names.items}) catch
+        .both => mod.renderToOwned(allocator, graph.writeRelationsForEntitySet, .{names}) catch
             return mod.errPayload("Allocation error"),
     };
     defer allocator.free(sql);
@@ -408,19 +448,21 @@ pub fn getNeighbors(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         return .{ .text = "{\"entities\":[],\"relations\":[]}", .is_error = false };
     };
 
+    // Collect the distinct endpoints of every incident relation, then fetch all
+    // of their entity rows in a single round-trip.
     var neighbor_names: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer neighbor_names.deinit(allocator);
 
     for (rows) |row| {
         const from = row.values[0] orelse "";
         const to = row.values[2] orelse "";
-        if (neighbor_names.get(from) == null) {
-            neighbor_names.put(allocator, from, {}) catch return mod.errPayload("Allocation error");
-        }
-        if (neighbor_names.get(to) == null) {
-            neighbor_names.put(allocator, to, {}) catch return mod.errPayload("Allocation error");
-        }
+        neighbor_names.put(allocator, from, {}) catch return mod.errPayload("Allocation error");
+        neighbor_names.put(allocator, to, {}) catch return mod.errPayload("Allocation error");
     }
+
+    var emap = fetchEntitiesByName(allocator, conn, neighbor_names.keys()) catch
+        return mod.errPayload("Query failed");
+    defer emap.deinit(allocator);
 
     var kg = Writer.Allocating.init(allocator);
     defer kg.deinit();
@@ -429,37 +471,17 @@ pub fn getNeighbors(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     kw.writeAll("{\"entities\":[") catch return mod.errPayload("Serialization error");
     var first_entity = true;
     for (neighbor_names.keys()) |nname| {
-        const e_sql = mod.renderToOwned(allocator, graph.writeGetEntity, .{nname}) catch
-            return mod.errPayload("Allocation error");
-        defer allocator.free(e_sql);
-
-        const e_result = conn.query(allocator, e_sql) catch continue;
-        const e_rows = e_result.rows orelse continue;
-        if (e_rows.len == 0) continue;
-        const erow = e_rows[0];
-        const etype = erow.values[0] orelse "";
-        const eobs = erow.values[1] orelse "[]";
-
+        const e = emap.get(nname) orelse continue;
         if (!first_entity) kw.writeByte(',') catch return mod.errPayload("Serialization error");
         first_entity = false;
-        kw.writeAll("{\"name\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(kw, nname) catch return mod.errPayload("Serialization error");
-        kw.writeAll(",\"entityType\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(kw, etype) catch return mod.errPayload("Serialization error");
-        kw.writeAll(",\"observations\":") catch return mod.errPayload("Serialization error");
-        kw.writeAll(eobs) catch return mod.errPayload("Serialization error");
-        kw.writeByte('}') catch return mod.errPayload("Serialization error");
+        writeEntityObject(kw, nname, e.entity_type, e.observations) catch
+            return mod.errPayload("Serialization error");
     }
     kw.writeAll("],\"relations\":[") catch return mod.errPayload("Serialization error");
     for (rows, 0..) |row, i| {
         if (i > 0) kw.writeByte(',') catch return mod.errPayload("Serialization error");
-        kw.writeAll("{\"from\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(kw, row.values[0] orelse "") catch return mod.errPayload("Serialization error");
-        kw.writeAll(",\"relationType\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(kw, row.values[1] orelse "") catch return mod.errPayload("Serialization error");
-        kw.writeAll(",\"to\":") catch return mod.errPayload("Serialization error");
-        writeJsonString(kw, row.values[2] orelse "") catch return mod.errPayload("Serialization error");
-        kw.writeByte('}') catch return mod.errPayload("Serialization error");
+        writeRelationObject(kw, row.values[0] orelse "", row.values[1] orelse "", row.values[2] orelse "") catch
+            return mod.errPayload("Serialization error");
     }
     kw.writeAll("]}") catch return mod.errPayload("Serialization error");
 
@@ -487,17 +509,14 @@ pub fn getEntityDegree(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Va
 }
 
 pub fn getGraphStatistics(_: Io, allocator: Allocator, conn: *PooledConn, _: ?Value) Payload {
-    const e_sql = mod.renderToOwned(allocator, graph.writeCountEntities, .{}) catch
+    // Both counts come back in one round-trip as a single two-column row.
+    const sql = mod.renderToOwned(allocator, graph.writeGraphStatistics, .{}) catch
         return mod.errPayload("Allocation error");
-    defer allocator.free(e_sql);
-    const e_result = conn.query(allocator, e_sql) catch return mod.errPayload("Query failed");
-    const e_count = if (e_result.rows) |rows| (if (rows.len > 0) rows[0].values[0] orelse "0" else "0") else "0";
-
-    const r_sql = mod.renderToOwned(allocator, graph.writeCountRelations, .{}) catch
-        return mod.errPayload("Allocation error");
-    defer allocator.free(r_sql);
-    const r_result = conn.query(allocator, r_sql) catch return mod.errPayload("Query failed");
-    const r_count = if (r_result.rows) |rows| (if (rows.len > 0) rows[0].values[0] orelse "0" else "0") else "0";
+    defer allocator.free(sql);
+    const result = conn.query(allocator, sql) catch return mod.errPayload("Query failed");
+    const row0 = if (result.rows) |rows| (if (rows.len > 0) rows[0] else null) else null;
+    const e_count = if (row0) |r| r.values[0] orelse "0" else "0";
+    const r_count = if (row0) |r| r.values[1] orelse "0" else "0";
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
@@ -514,17 +533,13 @@ pub fn upsertVectorEmbedding(_: Io, allocator: Allocator, conn: *PooledConn, arg
     const vec_val = mod.getArrayParam(args, "vector") orelse
         return mod.errPayload("Missing 'vector' parameter");
 
-    var vec: [384]f32 = undefined;
-    if (vec_val.items.len > 384) return mod.errPayload("Vector exceeds 384 dimensions");
-    for (vec_val.items, 0..) |item, i| {
-        vec[i] = switch (item) {
-            .float => |f| @as(f32, @floatCast(f)),
-            .integer => |n| @as(f32, @floatFromInt(n)),
-            else => return mod.errPayload("Vector must contain numbers"),
-        };
-    }
+    var vec: [vector_dims]f32 = undefined;
+    const vec_slice = parseVector(&vec, vec_val) catch |err| return switch (err) {
+        error.TooLong => mod.errPayload("Vector exceeds 384 dimensions"),
+        error.NotNumber => mod.errPayload("Vector must contain numbers"),
+    };
 
-    _ = execBuilt(allocator, conn, vector.writeUpsertVector, .{ id, entity_name, text_content, vec[0..vec_val.items.len] }) catch
+    _ = execBuilt(allocator, conn, vector.writeUpsertVector, .{ id, entity_name, text_content, vec_slice }) catch
         return mod.errPayload("Upsert failed");
 
     var aw = Writer.Allocating.init(allocator);
@@ -542,17 +557,13 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     const limit_val = mod.getStringParam(args, "limit") orelse "10";
     const limit = std.fmt.parseUnsigned(u64, limit_val, 10) catch 10;
 
-    var vec: [384]f32 = undefined;
-    if (vec_val.items.len > 384) return mod.errPayload("Vector exceeds 384 dimensions");
-    for (vec_val.items, 0..) |item, i| {
-        vec[i] = switch (item) {
-            .float => |f| @as(f32, @floatCast(f)),
-            .integer => |n| @as(f32, @floatFromInt(n)),
-            else => return mod.errPayload("Vector must contain numbers"),
-        };
-    }
+    var vec: [vector_dims]f32 = undefined;
+    const vec_slice = parseVector(&vec, vec_val) catch |err| return switch (err) {
+        error.TooLong => mod.errPayload("Vector exceeds 384 dimensions"),
+        error.NotNumber => mod.errPayload("Vector must contain numbers"),
+    };
 
-    const sql = mod.renderToOwned(allocator, vector.writeSearchVectors, .{ vec[0..vec_val.items.len], limit }) catch
+    const sql = mod.renderToOwned(allocator, vector.writeSearchVectors, .{ vec_slice, limit }) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(sql);
     const result = conn.query(allocator, sql) catch return mod.errPayload("Query failed");
@@ -679,4 +690,111 @@ pub fn fulltextSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     defer allocator.free(sql);
     const result = conn.query(allocator, sql) catch return mod.errPayload("Query failed");
     return mod.resultPayload(allocator, result);
+}
+
+// ── Tests (DB-free helper coverage) ───────────────────────────────────
+
+const testing = std.testing;
+
+fn jsonArray(arena: *std.heap.ArenaAllocator, src: []const u8) std.json.Array {
+    const parsed = std.json.parseFromSlice(Value, arena.allocator(), src, .{}) catch unreachable;
+    return parsed.value.array;
+}
+
+test "parseVector accepts mixed int/float and reports length" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var buf: [vector_dims]f32 = undefined;
+    const arr = jsonArray(&arena, "[1, 2.5, 3, -4.25]");
+    const out = try parseVector(&buf, arr);
+    try testing.expectEqual(@as(usize, 4), out.len);
+    try testing.expectEqual(@as(f32, 1.0), out[0]);
+    try testing.expectEqual(@as(f32, 2.5), out[1]);
+    try testing.expectEqual(@as(f32, 3.0), out[2]);
+    try testing.expectEqual(@as(f32, -4.25), out[3]);
+}
+
+test "parseVector rejects non-numbers" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var buf: [vector_dims]f32 = undefined;
+    const arr = jsonArray(&arena, "[1, \"two\", 3]");
+    try testing.expectError(error.NotNumber, parseVector(&buf, arr));
+}
+
+test "parseVector rejects over-long vectors" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var buf: [vector_dims]f32 = undefined;
+    // Build a 385-element array.
+    var aw = Writer.Allocating.init(arena.allocator());
+    try aw.writer.writeByte('[');
+    for (0..vector_dims + 1) |i| {
+        if (i > 0) try aw.writer.writeByte(',');
+        try aw.writer.writeByte('1');
+    }
+    try aw.writer.writeByte(']');
+    const arr = jsonArray(&arena, try aw.toOwnedSlice());
+    try testing.expectError(error.TooLong, parseVector(&buf, arr));
+}
+
+test "parseVector accepts exactly 384 dims" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var buf: [vector_dims]f32 = undefined;
+    var aw = Writer.Allocating.init(arena.allocator());
+    try aw.writer.writeByte('[');
+    for (0..vector_dims) |i| {
+        if (i > 0) try aw.writer.writeByte(',');
+        try aw.writer.writeByte('0');
+    }
+    try aw.writer.writeByte(']');
+    const arr = jsonArray(&arena, try aw.toOwnedSlice());
+    const out = try parseVector(&buf, arr);
+    try testing.expectEqual(@as(usize, vector_dims), out.len);
+}
+
+test "stringArray collects strings" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const arr = jsonArray(&arena, "[\"a\",\"b\",\"c\"]");
+    const out = try stringArray(arena.allocator(), arr);
+    try testing.expectEqual(@as(usize, 3), out.len);
+    try testing.expectEqualStrings("a", out[0]);
+    try testing.expectEqualStrings("c", out[2]);
+}
+
+test "stringArray rejects non-string element" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const arr = jsonArray(&arena, "[\"a\", 2]");
+    try testing.expectError(error.NotString, stringArray(arena.allocator(), arr));
+}
+
+test "stringArray handles empty array" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const arr = jsonArray(&arena, "[]");
+    const out = try stringArray(arena.allocator(), arr);
+    try testing.expectEqual(@as(usize, 0), out.len);
+}
+
+test "writeEntityObject embeds raw observations and escapes name/type" {
+    var buf: [512]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try writeEntityObject(&w, "A\"x", "person", "[\"o1\"]");
+    try testing.expectEqualStrings(
+        "{\"name\":\"A\\\"x\",\"entityType\":\"person\",\"observations\":[\"o1\"]}",
+        w.buffered(),
+    );
+}
+
+test "writeRelationObject" {
+    var buf: [256]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    try writeRelationObject(&w, "A", "knows", "B");
+    try testing.expectEqualStrings(
+        "{\"from\":\"A\",\"relationType\":\"knows\",\"to\":\"B\"}",
+        w.buffered(),
+    );
 }
