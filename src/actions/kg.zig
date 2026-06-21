@@ -92,9 +92,12 @@ fn fetchEntitiesByName(
     defer allocator.free(sql);
     const result = try conn.query(allocator, sql);
     const rows = result.rows orelse return map;
+    // Row count is known up front (one entry per row, duplicates overwrite), so
+    // size once instead of letting the map rehash as it grows.
+    try map.ensureTotalCapacity(allocator, @intCast(rows.len));
     for (rows) |row| {
         const nm = row.values[0] orelse continue;
-        try map.put(allocator, nm, .{
+        map.putAssumeCapacity(nm, .{
             .entity_type = row.values[1] orelse "",
             .observations = row.values[2] orelse "[]",
         });
@@ -114,11 +117,13 @@ pub fn createEntities(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     {
         var batch: std.ArrayList(graph.EntityInsertRow) = .empty;
         defer batch.deinit(allocator);
+        // Exact row count is known: one batch row per entity, no resize.
+        batch.ensureTotalCapacity(allocator, entities.len) catch
+            return mod.errPayload("Allocation error");
         for (entities) |entity| {
             const obs_json = graph.observationsToJson(allocator, entity.observations) catch
                 return mod.errPayload("Serialization error");
-            batch.append(allocator, .{ .name = entity.name, .entity_type = entity.entity_type, .obs_json = obs_json }) catch
-                return mod.errPayload("Allocation error");
+            batch.appendAssumeCapacity(.{ .name = entity.name, .entity_type = entity.entity_type, .obs_json = obs_json });
         }
         const sql = mod.renderToOwned(allocator, graph.writeInsertEntities, .{batch.items}) catch
             return mod.errPayload("Allocation error");
@@ -269,6 +274,9 @@ fn fetchEntitiesAndRelations(allocator: Allocator, conn: *PooledConn, sql_entiti
     const e_rows = e_result.rows orelse return mod.errPayload("No entity data");
 
     var entity_names: std.ArrayList([]const u8) = .empty;
+    // One name per entity row; reserve exactly that, no resize.
+    entity_names.ensureTotalCapacity(allocator, e_rows.len) catch
+        return mod.errPayload("Allocation error");
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
     const w = &aw.writer;
@@ -279,7 +287,7 @@ fn fetchEntitiesAndRelations(allocator: Allocator, conn: *PooledConn, sql_entiti
         const etype = row.values[1] orelse "";
         const eobs = row.values[2] orelse "[]";
 
-        entity_names.append(allocator, ename) catch return mod.errPayload("Allocation error");
+        entity_names.appendAssumeCapacity(ename);
 
         if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
         w.writeAll("{\"name\":") catch return mod.errPayload("Serialization error");
@@ -453,11 +461,14 @@ pub fn getNeighbors(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     var neighbor_names: std.StringArrayHashMapUnmanaged(void) = .empty;
     defer neighbor_names.deinit(allocator);
 
+    // At most two distinct endpoints per relation row; size once up front.
+    neighbor_names.ensureTotalCapacity(allocator, @intCast(rows.len * 2)) catch
+        return mod.errPayload("Allocation error");
     for (rows) |row| {
         const from = row.values[0] orelse "";
         const to = row.values[2] orelse "";
-        neighbor_names.put(allocator, from, {}) catch return mod.errPayload("Allocation error");
-        neighbor_names.put(allocator, to, {}) catch return mod.errPayload("Allocation error");
+        neighbor_names.putAssumeCapacity(from, {});
+        neighbor_names.putAssumeCapacity(to, {});
     }
 
     var emap = fetchEntitiesByName(allocator, conn, neighbor_names.keys()) catch
@@ -797,4 +808,47 @@ test "writeRelationObject" {
         "{\"from\":\"A\",\"relationType\":\"knows\",\"to\":\"B\"}",
         w.buffered(),
     );
+}
+
+// ---- fuzzing --------------------------------------------------------------
+// parseVector and stringArray consume arrays parsed from untrusted JSON; per
+// Agent.md every such extractor gets a property test asserting it never panics
+// across all JSON value variants, lengths spanning the 384-dim cap, and the
+// empty case. We feed generated JSON text through the real parser so the whole
+// bytes -> Value -> extractor path is exercised.
+
+test "fuzz: parseVector / stringArray never panic on random JSON arrays" {
+    var prng = std.Random.DefaultPrng.init(0xF00D);
+    const rnd = prng.random();
+    var fbuf: [vector_dims]f32 = undefined;
+
+    for (0..500) |_| {
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        const a = arena.allocator();
+
+        var aw = Writer.Allocating.init(a);
+        const w = &aw.writer;
+        w.writeByte('[') catch continue;
+        const n = rnd.intRangeAtMost(usize, 0, 400); // spans the 384 cap on both sides
+        for (0..n) |i| {
+            if (i > 0) w.writeByte(',') catch continue;
+            switch (rnd.intRangeLessThan(u8, 0, 6)) {
+                0 => w.writeAll("null") catch {},
+                1 => w.writeAll(if (rnd.boolean()) "true" else "false") catch {},
+                2 => w.print("{d}", .{rnd.int(i32)}) catch {},
+                3 => w.print("{d}.25", .{rnd.int(i16)}) catch {},
+                4 => w.writeAll("\"s\"") catch {},
+                else => w.writeAll("[]") catch {},
+            }
+        }
+        w.writeByte(']') catch continue;
+        const src = aw.toOwnedSlice() catch continue;
+
+        const parsed = std.json.parseFromSlice(Value, a, src, .{}) catch continue;
+        if (parsed.value != .array) continue;
+        const arr = parsed.value.array;
+        _ = parseVector(&fbuf, arr) catch {};
+        _ = stringArray(a, arr) catch {};
+    }
 }

@@ -992,3 +992,33 @@ test "writeGraphStatistics single round-trip query" {
         try renderSql(&buf, writeGraphStatistics, .{}),
     );
 }
+
+// ---- fuzzing --------------------------------------------------------------
+// The search/fulltext builders interpolate an untrusted query string into a
+// LIKE literal. Per Agent.md, fuzz the escaping path over arbitrary bytes
+// (including NUL, quotes, backslashes, high bytes) using an allocating writer so
+// variable-length input can never overflow a fixed buffer. Invariant: the
+// builder never panics on any input. (The structural "no bare `||`" guarantee is
+// covered by the deterministic tests; it can't be asserted here because random
+// query bytes may legitimately contain `|` characters inside the escaped literal.)
+
+test "fuzz: writeSearchEntities / writeFulltextSearch never panic on random bytes" {
+    var prng = std.Random.DefaultPrng.init(0x5EA4C);
+    const rnd = prng.random();
+    var qbuf: [256]u8 = undefined;
+
+    for (0..500) |_| {
+        const len = rnd.intRangeLessThan(usize, 0, qbuf.len);
+        const q = qbuf[0..len];
+        for (q) |*b| b.* = rnd.int(u8);
+
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+
+        var se = Writer.Allocating.init(arena.allocator());
+        writeSearchEntities(&se.writer, q, null, null, null) catch {};
+
+        var fs = Writer.Allocating.init(arena.allocator());
+        writeFulltextSearch(&fs.writer, q, 10) catch {};
+    }
+}
