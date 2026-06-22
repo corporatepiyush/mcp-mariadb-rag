@@ -8,10 +8,15 @@ comptime {
     _ = @import("src/validation.zig");
     _ = @import("src/actions/schema.zig");
     _ = @import("src/actions/kg.zig");
+    _ = @import("src/actions/rag.zig");
     _ = @import("src/kg/schema.zig");
     _ = @import("src/kg/types.zig");
     _ = @import("src/kg/graph.zig");
     _ = @import("src/kg/vector.zig");
+    _ = @import("src/rag/schema.zig");
+    _ = @import("src/rag/chunk.zig");
+    _ = @import("src/rag/fusion.zig");
+    _ = @import("src/rag/query.zig");
 
     // ---- Standalone test files -------------------------------------------
     _ = @import("tests/json_test.zig");
@@ -23,4 +28,6 @@ comptime {
     _ = @import("tests/integration_test.zig");
     _ = @import("tests/kg_test.zig");
     _ = @import("tests/kg_bench.zig");
+    _ = @import("tests/rag_test.zig");
+    _ = @import("tests/rag_bench.zig");
 }

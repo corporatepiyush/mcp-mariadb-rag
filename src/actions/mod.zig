@@ -5,6 +5,7 @@ const schema = @import("schema.zig");
 const query = @import("query.zig");
 const stubs = @import("stubs.zig");
 const kg = @import("kg.zig");
+const rag = @import("rag.zig");
 
 const Value = std.json.Value;
 const Writer = std.Io.Writer;
@@ -86,6 +87,16 @@ pub const registry = std.StaticStringMap(Handler).initComptime(.{
     .{ "get_graph_statistics", kg.getGraphStatistics },
     .{ "upsert_vector_embedding", kg.upsertVectorEmbedding },
     .{ "delete_vector_embedding", kg.deleteVectorEmbedding },
+    // ---- RAG engine: ingest, hybrid retrieval, document store ----
+    .{ "rag_chunk_text", rag.chunkText },
+    .{ "rag_ingest_document", rag.ingestDocument },
+    .{ "rag_upsert_chunks", rag.upsertChunks },
+    .{ "rag_search", rag.search },
+    .{ "rag_vector_search", rag.vectorSearch },
+    .{ "rag_get_document", rag.getDocument },
+    .{ "rag_list_documents", rag.listDocuments },
+    .{ "rag_delete_document", rag.deleteDocument },
+    .{ "rag_stats", rag.stats },
 });
 
 const write_names = std.StaticStringMap(void).initComptime(.{
@@ -99,6 +110,7 @@ const write_names = std.StaticStringMap(void).initComptime(.{
     .{"create_entities"}, .{"create_relations"}, .{"delete_entities"},
     .{"delete_relations"}, .{"add_observations"}, .{"delete_observations"},
     .{"upsert_vector_embedding"}, .{"delete_vector_embedding"},
+    .{"rag_ingest_document"}, .{"rag_upsert_chunks"}, .{"rag_delete_document"},
 });
 
 pub fn isWriteTool(name: []const u8) bool {

@@ -1,6 +1,6 @@
 .{
     .name = .mcp_mariadb_rag,
-    .version = "0.3.2",
+    .version = "0.4.0",
     .fingerprint = 0xefade0563a668bd7,
     .paths = .{
         "build.zig",

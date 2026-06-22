@@ -3,6 +3,7 @@ const config_mod = @import("config.zig");
 const transport = @import("transport.zig");
 const pool_mod = @import("pool.zig");
 const schema_kg = @import("kg/schema.zig");
+const schema_rag = @import("rag/schema.zig");
 
 fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
     var conn = try pool.acquire();
@@ -15,6 +16,9 @@ fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
         schema_kg.writeCreateTypeDict,
         schema_kg.writeCreateGraphStat,
         schema_kg.writeCreateVectorEmbedding,
+        // RAG document/chunk store shares the same engine and init path.
+        schema_rag.writeCreateDocument,
+        schema_rag.writeCreateChunk,
     }) |write_fn| {
         var buf: [4096]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
@@ -22,7 +26,7 @@ fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
         _ = try conn.execute(w.buffered());
     }
 
-    std.log.info("Knowledge graph schema initialized (6 tables)", .{});
+    std.log.info("Knowledge graph + RAG schema initialized (8 tables)", .{});
 }
 
 pub fn main() !void {
