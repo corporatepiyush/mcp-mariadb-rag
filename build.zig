@@ -10,6 +10,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.link_libc = true;
+    exe_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
+    exe_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
     exe_mod.linkSystemLibrary("sqlite3", .{});
 
     const exe = b.addExecutable(.{
@@ -30,6 +32,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.link_libc = true;
+    test_mod.addLibraryPath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/lib" });
+    test_mod.addIncludePath(.{ .cwd_relative = "/opt/homebrew/opt/sqlite/include" });
     test_mod.linkSystemLibrary("sqlite3", .{});
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });

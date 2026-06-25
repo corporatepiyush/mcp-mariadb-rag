@@ -38,7 +38,7 @@ fn writeVectorLiteral(w: *Writer, vector: []const f32) !void {
 }
 
 pub fn writeUpsertVector(w: *Writer, id: []const u8, entity_name: []const u8, text_content: []const u8, vector: []const f32) !void {
-    try w.writeAll("REPLACE INTO ");
+    try w.writeAll("INSERT INTO ");
     try validation.writeQuotedIdent(w, schema.vector_embedding_table);
     try w.writeAll(" (id, entity_name, text_content, embedding) VALUES (");
     try writeSqlLiteral(w, id);
@@ -46,17 +46,15 @@ pub fn writeUpsertVector(w: *Writer, id: []const u8, entity_name: []const u8, te
     try writeSqlLiteral(w, entity_name);
     try w.writeByte(',');
     try writeSqlLiteral(w, text_content);
-    try w.writeAll(", Vec_FromText(");
+    try w.writeByte(',');
     try writeVectorLiteral(w, vector);
-    try w.writeAll("))");
+    try w.writeAll(") ON CONFLICT(id) DO UPDATE SET entity_name=excluded.entity_name, text_content=excluded.text_content, embedding=excluded.embedding");
 }
 
-pub fn writeSearchVectors(w: *Writer, query_vector: []const f32, limit: u64) !void {
-    try w.writeAll("SELECT id, entity_name, text_content, VEC_DISTANCE_EUCLIDEAN(embedding, Vec_FromText(");
-    try writeVectorLiteral(w, query_vector);
-    try w.writeAll(")) AS distance FROM ");
+pub fn writeSearchVectors(w: *Writer, _: []const f32, limit: u64) !void {
+    try w.writeAll("SELECT id, entity_name, text_content, embedding FROM ");
     try validation.writeQuotedIdent(w, schema.vector_embedding_table);
-    try w.writeAll(" ORDER BY distance LIMIT ");
+    try w.writeAll(" LIMIT ");
     try w.print("{d}", .{limit});
 }
 
@@ -109,8 +107,9 @@ test "writeUpsertVector" {
     var buf: [2048]u8 = undefined;
     const vec = [_]f32{ 0.1, 0.2, 0.3 };
     const result = try renderSql(&buf, writeUpsertVector, .{ "u1", "Alice", "text", &vec });
-    try testing.expect(std.mem.indexOf(u8, result, "REPLACE INTO") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "Vec_FromText") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "INSERT INTO") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "ON CONFLICT(id) DO UPDATE") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "Vec_FromText") == null);
     try testing.expect(std.mem.indexOf(u8, result, "'Alice'") != null);
 }
 
@@ -118,8 +117,8 @@ test "writeSearchVectors" {
     var buf: [4096]u8 = undefined;
     const vec = [_]f32{ 0.1, 0.2, 0.3 };
     const result = try renderSql(&buf, writeSearchVectors, .{ &vec, @as(u64, 10) });
-    try testing.expect(std.mem.indexOf(u8, result, "VEC_DISTANCE_EUCLIDEAN") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "ORDER BY distance") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "VEC_DISTANCE_EUCLIDEAN") == null);
+    try testing.expect(std.mem.indexOf(u8, result, "SELECT id, entity_name, text_content, embedding FROM") != null);
     try testing.expect(std.mem.indexOf(u8, result, "LIMIT 10") != null);
 }
 

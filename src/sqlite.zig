@@ -81,7 +81,7 @@ pub extern "c" fn sqlite3_open_v2(path: [*:0]const u8, ppDb: *?*sqlite3, flags: 
 pub extern "c" fn sqlite3_close_v2(db: ?*sqlite3) c_int;
 pub extern "c" fn sqlite3_db_handle(stmt: ?*sqlite3_stmt) ?*sqlite3;
 pub extern "c" fn sqlite3_exec(db: ?*sqlite3, sql: [*:0]const u8, callback: ?*const fn (?*anyopaque, c_int, **u8, **u8) callconv(.c) c_int, arg: ?*anyopaque, errmsg: ?*?*u8) c_int;
-pub extern "c" fn sqlite3_prepare_v3(db: ?*sqlite3, sql: [*:0]const u8, nByte: c_int, flags: c_uint, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
+pub extern "c" fn sqlite3_prepare_v3(db: ?*sqlite3, sql: [*]const u8, nByte: c_int, flags: c_uint, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
 pub extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
 pub extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
 pub extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
@@ -126,9 +126,9 @@ pub fn exec(db: *sqlite3, sql: [*:0]const u8) Error!void {
     try check(sqlite3_exec(db, sql, null, null, null));
 }
 
-pub fn prepare(db: *sqlite3, sql: [*:0]const u8) Error!*sqlite3_stmt {
+pub fn prepare(db: *sqlite3, sql: []const u8) Error!*sqlite3_stmt {
     var stmt: ?*sqlite3_stmt = null;
-    try check(sqlite3_prepare_v3(db, sql, -1, SQLITE_PREPARE_PERSISTENT, &stmt, null));
+    try check(sqlite3_prepare_v3(db, sql.ptr, @intCast(sql.len), SQLITE_PREPARE_PERSISTENT, &stmt, null));
     return stmt.?;
 }
 

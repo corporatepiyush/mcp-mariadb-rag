@@ -38,17 +38,12 @@ fn writeVectorLiteral(w: *Writer, vector: []const f32) !void {
 }
 
 // ── Distance metric ───────────────────────────────────────────────────
+// Retained for API compatibility; distance computation moves to
+// application code (fusion.zig SIMD kernels) in Phase 1e.
 
 pub const Metric = enum {
     euclidean,
     cosine,
-
-    fn sqlFunc(self: Metric) []const u8 {
-        return switch (self) {
-            .euclidean => "VEC_DISTANCE_EUCLIDEAN",
-            .cosine => "VEC_DISTANCE_COSINE",
-        };
-    }
 
     pub fn parse(s: ?[]const u8) Metric {
         const str = s orelse return .euclidean;
@@ -68,7 +63,7 @@ pub fn writeUpsertDocument(
     metadata: []const u8,
     chunk_count: u64,
 ) !void {
-    try w.writeAll("REPLACE INTO ");
+    try w.writeAll("INSERT INTO ");
     try validation.writeQuotedIdent(w, schema.document_table);
     try w.writeAll(" (id, uri, title, metadata, chunk_count) VALUES (");
     try writeSqlLiteral(w, id);
@@ -79,6 +74,7 @@ pub fn writeUpsertDocument(
     try w.writeByte(',');
     try writeSqlLiteral(w, metadata);
     try w.print(",{d})", .{chunk_count});
+    try w.writeAll(" ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count");
 }
 
 /// `SELECT id, uri, title, metadata, chunk_count FROM rag_document WHERE id = '<id>'`
@@ -121,7 +117,7 @@ pub const ChunkRow = struct {
 /// Multi-row `REPLACE INTO rag_chunk (...) VALUES (...), (...)`. Caller must
 /// guarantee `rows.len > 0`.
 pub fn writeUpsertChunks(w: *Writer, rows: []const ChunkRow) !void {
-    try w.writeAll("REPLACE INTO ");
+    try w.writeAll("INSERT INTO ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
     try w.writeAll(" (id, document_id, ordinal, content, token_count, embedding) VALUES ");
     for (rows, 0..) |r, i| {
@@ -132,10 +128,11 @@ pub fn writeUpsertChunks(w: *Writer, rows: []const ChunkRow) !void {
         try writeSqlLiteral(w, r.document_id);
         try w.print(",{d},", .{r.ordinal});
         try writeSqlLiteral(w, r.content);
-        try w.print(",{d},Vec_FromText(", .{r.token_count});
+        try w.print(",{d},", .{r.token_count});
         try writeVectorLiteral(w, r.vector);
-        try w.writeAll("))");
+        try w.writeAll(")");
     }
+    try w.writeAll(" ON CONFLICT(id) DO UPDATE SET document_id=excluded.document_id, ordinal=excluded.ordinal, content=excluded.content, token_count=excluded.token_count, embedding=excluded.embedding");
 }
 
 pub fn writeDeleteChunksByDocument(w: *Writer, document_id: []const u8) !void {
@@ -155,31 +152,25 @@ pub fn writeChunksByDocument(w: *Writer, document_id: []const u8) !void {
 
 // ── Retrieval ─────────────────────────────────────────────────────────
 
-/// Semantic top-k by vector distance. Returns the embedding as text so the
-/// caller can re-rank (MMR) without a second round-trip.
-/// `SELECT id, document_id, ordinal, content, VEC_ToText(embedding) AS emb,
-///   <metric>(embedding, Vec_FromText('[..]')) AS distance FROM rag_chunk
-///   ORDER BY distance LIMIT k`
-pub fn writeVectorTopK(w: *Writer, query_vector: []const f32, k: u64, metric: Metric) !void {
-    try w.writeAll("SELECT id, document_id, ordinal, content, VEC_ToText(embedding) AS emb, ");
-    try w.writeAll(metric.sqlFunc());
-    try w.writeAll("(embedding, Vec_FromText(");
-    try writeVectorLiteral(w, query_vector);
-    try w.writeAll(")) AS distance FROM ");
+/// Semantic top-k by vector distance. Distance computation moves to
+/// application code (fusion.zig SIMD kernels) — the query just returns all
+/// candidates so the caller can re-rank (MMR) without a second round-trip.
+/// `SELECT id, document_id, ordinal, content, embedding FROM rag_chunk LIMIT k`
+pub fn writeVectorTopK(w: *Writer, _: []const f32, k: u64, _: Metric) !void {
+    try w.writeAll("SELECT id, document_id, ordinal, content, embedding FROM ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
-    try w.print(" ORDER BY distance LIMIT {d}", .{k});
+    try w.print(" LIMIT {d}", .{k});
 }
 
 /// Lexical top-k by substring match. Ordered by content length ascending as a
 /// simple match-density proxy (shorter chunks containing the term score higher);
 /// RRF only needs a stable rank, the semantic side carries the fine ordering.
-/// Embedding text is returned so fused candidates can feed MMR.
 pub fn writeLexicalTopK(w: *Writer, query: []const u8, k: u64) !void {
-    try w.writeAll("SELECT id, document_id, ordinal, content, VEC_ToText(embedding) AS emb FROM ");
+    try w.writeAll("SELECT id, document_id, ordinal, content, embedding FROM ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
     try w.writeAll(" WHERE content ");
     try writeLikeContains(w, query);
-    try w.print(" ORDER BY CHAR_LENGTH(content) LIMIT {d}", .{k});
+    try w.print(" ORDER BY LENGTH(content) LIMIT {d}", .{k});
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────
@@ -206,7 +197,7 @@ fn renderSql(buf: []u8, comptime f: anytype, args: anytype) ![]u8 {
 test "writeUpsertDocument" {
     var buf: [1024]u8 = undefined;
     try testing.expectEqualStrings(
-        "REPLACE INTO `rag_document` (id, uri, title, metadata, chunk_count) VALUES ('d1','file://x','Title','{}',3)",
+        "INSERT INTO `rag_document` (id, uri, title, metadata, chunk_count) VALUES ('d1','file://x','Title','{}',3) ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count",
         try renderSql(&buf, writeUpsertDocument, .{ "d1", "file://x", "Title", "{}", @as(u64, 3) }),
     );
 }
@@ -234,7 +225,7 @@ test "writeListDocuments with limit/offset" {
     );
 }
 
-test "writeUpsertChunks batches rows with Vec_FromText" {
+test "writeUpsertChunks batches rows" {
     var buf: [2048]u8 = undefined;
     const v0 = [_]f32{ 0.1, 0.2 };
     const v1 = [_]f32{ 0.3, 0.4 };
@@ -243,29 +234,27 @@ test "writeUpsertChunks batches rows with Vec_FromText" {
         .{ .id = "d1#1", .document_id = "d1", .ordinal = 1, .content = "world", .token_count = 1, .vector = &v1 },
     };
     const out = try renderSql(&buf, writeUpsertChunks, .{&rows});
-    try testing.expect(std.mem.indexOf(u8, out, "REPLACE INTO `rag_chunk` (id, document_id, ordinal, content, token_count, embedding) VALUES ") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "('d1#0','d1',0,'hello',1,Vec_FromText('[0.1,0.2]'))") != null);
-    try testing.expect(std.mem.indexOf(u8, out, ", ('d1#1','d1',1,'world',1,Vec_FromText('[0.3,0.4]'))") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "INSERT INTO `rag_chunk` (id, document_id, ordinal, content, token_count, embedding) VALUES ") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ON CONFLICT(id) DO UPDATE") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "('d1#0','d1',0,'hello',1,'[0.1,0.2]')") != null);
+    try testing.expect(std.mem.indexOf(u8, out, ", ('d1#1','d1',1,'world',1,'[0.3,0.4]')") != null);
 }
 
-test "writeVectorTopK euclidean vs cosine" {
+test "writeVectorTopK selects embedding and limits" {
     var buf: [2048]u8 = undefined;
     const v = [_]f32{ 1, 2, 3 };
     const e = try renderSql(&buf, writeVectorTopK, .{ &v, @as(u64, 5), Metric.euclidean });
-    try testing.expect(std.mem.indexOf(u8, e, "VEC_DISTANCE_EUCLIDEAN(embedding, Vec_FromText('[1,2,3]'))") != null);
-    try testing.expect(std.mem.indexOf(u8, e, "VEC_ToText(embedding) AS emb") != null);
-    try testing.expect(std.mem.indexOf(u8, e, "ORDER BY distance LIMIT 5") != null);
-
-    var buf2: [2048]u8 = undefined;
-    const c = try renderSql(&buf2, writeVectorTopK, .{ &v, @as(u64, 5), Metric.cosine });
-    try testing.expect(std.mem.indexOf(u8, c, "VEC_DISTANCE_COSINE") != null);
+    try testing.expect(std.mem.indexOf(u8, e, "VEC_DISTANCE_EUCLIDEAN") == null);
+    try testing.expect(std.mem.indexOf(u8, e, "VEC_ToText") == null);
+    try testing.expect(std.mem.indexOf(u8, e, "SELECT id, document_id, ordinal, content, embedding FROM") != null);
+    try testing.expect(std.mem.indexOf(u8, e, "LIMIT 5") != null);
 }
 
-test "writeLexicalTopK builds escaped LIKE, never `||`" {
+test "writeLexicalTopK builds escaped LIKE, uses LENGTH" {
     var buf: [1024]u8 = undefined;
     const out = try renderSql(&buf, writeLexicalTopK, .{ "neural", @as(u64, 8) });
     try testing.expect(std.mem.indexOf(u8, out, "WHERE content LIKE '%neural%'") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "ORDER BY CHAR_LENGTH(content) LIMIT 8") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ORDER BY LENGTH(content) LIMIT 8") != null);
     try testing.expect(std.mem.indexOf(u8, out, "||") == null);
 }
 

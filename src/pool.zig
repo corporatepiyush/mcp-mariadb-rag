@@ -41,6 +41,7 @@ pub const DatabaseConn = struct {
         try sqlite.exec(db, "PRAGMA journal_mode=WAL");
         try sqlite.exec(db, "PRAGMA foreign_keys=OFF");
         try sqlite.check(sqlite.sqlite3_busy_timeout(db, 5000));
+        try sqlite.exec(db, "PRAGMA optimize");
         return .{ .id = id, .db = db };
     }
 
@@ -49,11 +50,7 @@ pub const DatabaseConn = struct {
     }
 
     pub fn query(self: *DatabaseConn, allocator: std.mem.Allocator, sql: []const u8) !QueryResult {
-        const sql_z = try allocator.alloc(u8, sql.len + 1);
-        defer allocator.free(sql_z);
-        for (sql, 0..) |byte, j| sql_z[j] = byte;
-        sql_z[sql.len] = 0;
-        const stmt = try sqlite.prepare(self.db, sql_z[0..sql.len :0]);
+        const stmt = try sqlite.prepare(self.db, sql);
         defer sqlite.finalize(stmt);
 
         const col_count = @as(usize, @intCast(sqlite.sqlite3_column_count(stmt)));
@@ -80,7 +77,11 @@ pub const DatabaseConn = struct {
 
         var rows: std.ArrayList(Row) = .empty;
         var first_row = true;
-        while (sqlite.sqlite3_step(stmt) == sqlite.SQLITE_ROW) {
+        while (true) {
+            const rc = sqlite.sqlite3_step(stmt);
+            if (rc == sqlite.SQLITE_DONE) break;
+            if (rc != sqlite.SQLITE_ROW) try sqlite.check(rc);
+
             const values = try allocator.alloc(?[]const u8, col_count);
             for (0..col_count) |i| {
                 const ci = @as(c_int, @intCast(i));
@@ -120,11 +121,9 @@ pub const DatabaseConn = struct {
     }
 
     pub fn execute(self: *DatabaseConn, sql: []const u8) !u64 {
-        var buf: [4096]u8 = undefined;
-        if (sql.len >= buf.len) return error.SqlTooLong;
-        for (sql, 0..) |byte, j| buf[j] = byte;
-        buf[sql.len] = 0;
-        try sqlite.exec(self.db, buf[0..sql.len :0]);
+        const stmt = try sqlite.prepare(self.db, sql);
+        defer sqlite.finalize(stmt);
+        try sqlite.check(sqlite.sqlite3_step(stmt));
         return @intCast(sqlite.sqlite3_changes(self.db));
     }
 };
@@ -140,6 +139,7 @@ pub const PooledConnection = struct {
         } else {
             self.conn.deinit();
         }
+        self.* = undefined;
     }
 
     pub fn query(self: *PooledConnection, a: std.mem.Allocator, sql: []const u8) !QueryResult {
@@ -359,6 +359,33 @@ test "DatabaseConn error on bad SQL" {
     defer conn.deinit();
 
     try testing.expectError(error.SqliteError, conn.execute("CREATE TABLE"));
+}
+
+test "DatabaseConn constraint violation on execute" {
+    var conn = try DatabaseConn.init("sqlite://", 7, .{ .enforce = false, .verify = false, .ca_path = null });
+    defer conn.deinit();
+    _ = try conn.execute("CREATE TABLE t(x INTEGER UNIQUE)");
+    _ = try conn.execute("INSERT INTO t VALUES(1)");
+    try testing.expectError(error.SqliteConstraint, conn.execute("INSERT INTO t VALUES(1)"));
+}
+
+test "DatabaseConn execute with long SQL" {
+    var conn = try DatabaseConn.init("sqlite://", 8, .{ .enforce = false, .verify = false, .ca_path = null });
+    defer conn.deinit();
+    _ = try conn.execute("CREATE TABLE t(x TEXT)");
+
+    const prefix = "INSERT INTO t VALUES('";
+    const suffix = "')";
+    const content_len = 4096;
+    var buf: [prefix.len + content_len + suffix.len]u8 = undefined;
+
+    for (prefix, 0..) |byte, j| buf[j] = byte;
+    for (buf[prefix.len..][0..content_len]) |*c| c.* = 'a';
+    for (suffix, 0..) |byte, j| buf[prefix.len + content_len + j] = byte;
+
+    try testing.expect(buf.len > 4096);
+    const n = try conn.execute(buf[0..]);
+    try testing.expectEqual(@as(u64, 1), n);
 }
 
 test "DatabaseConn column names and kinds" {

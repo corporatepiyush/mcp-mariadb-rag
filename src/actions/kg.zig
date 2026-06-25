@@ -6,6 +6,8 @@ const graph = @import("../kg/graph.zig");
 const vector = @import("../kg/vector.zig");
 const types = @import("../kg/types.zig");
 const schema = @import("../kg/schema.zig");
+const fusion = @import("../rag/fusion.zig");
+const sqtypes = @import("../types.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -567,6 +569,8 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         return mod.errPayload("Missing 'vector' parameter");
     const limit_val = mod.getStringParam(args, "limit") orelse "10";
     const limit = std.fmt.parseUnsigned(u64, limit_val, 10) catch 10;
+    const metric_str = mod.getStringParam(args, "metric");
+    const is_euclidean = if (metric_str) |m| std.ascii.eqlIgnoreCase(m, "euclidean") else false;
 
     var vec: [vector_dims]f32 = undefined;
     const vec_slice = parseVector(&vec, vec_val) catch |err| return switch (err) {
@@ -578,7 +582,72 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         return mod.errPayload("Allocation error");
     defer allocator.free(sql);
     const result = conn.query(allocator, sql) catch return mod.errPayload("Query failed");
-    return mod.resultPayload(allocator, result);
+    return reorderKgRows(allocator, result, vec_slice, is_euclidean);
+}
+
+/// Parse `[v0,v1,...]` text into an owned float slice.
+fn parseEmbText(a: Allocator, text: []const u8) ![]f32 {
+    const trimmed = std.mem.trim(u8, text, " []");
+    if (trimmed.len == 0) return &.{};
+    var count: usize = 1;
+    for (trimmed) |c| {
+        if (c == ',') count += 1;
+    }
+    const out = try a.alloc(f32, count);
+    var it = std.mem.splitScalar(u8, trimmed, ',');
+    var i: usize = 0;
+    while (it.next()) |part| : (i += 1) out[i] = std.fmt.parseFloat(f32, std.mem.trim(u8, part, " ")) catch 0;
+    return out[0..i];
+}
+
+fn reorderKgRows(a: Allocator, result: pool.QueryResult, qvec: []const f32, is_euclidean: bool) Payload {
+    const rows = result.rows orelse return mod.resultPayload(a, result);
+    if (rows.len < 2) return mod.resultPayload(a, result);
+
+    const n = rows.len;
+    const distances = a.alloc(f32, n) catch return mod.errPayload("Allocation error");
+    defer a.free(distances);
+
+    const valid = a.alloc(bool, n) catch return mod.errPayload("Allocation error");
+    defer a.free(valid);
+
+    for (rows, 0..) |row, i| {
+        const emb = parseEmbText(a, row.values[3] orelse "") catch {
+            valid[i] = false;
+            continue;
+        };
+        valid[i] = emb.len > 0;
+        distances[i] = if (valid[i])
+            if (is_euclidean) fusion.euclideanDistance(emb, qvec) else 1.0 - fusion.cosineSimilarity(emb, qvec)
+        else
+            std.math.inf(f32);
+    }
+
+    const indices = a.alloc(usize, n) catch return mod.errPayload("Allocation error");
+    defer a.free(indices);
+    for (0..n) |i| indices[i] = i;
+
+    const SortCtx = struct { d: []const f32, v: []const bool };
+    std.sort.block(usize, indices, SortCtx{ .d = distances, .v = valid }, struct {
+        fn less(ctx: SortCtx, x: usize, y: usize) bool {
+            if (ctx.v[x] != ctx.v[y]) return ctx.v[x];
+            return ctx.d[x] < ctx.d[y];
+        }
+    }.less);
+
+    const sorted_rows = a.alloc(sqtypes.Row, n) catch return mod.errPayload("Allocation error");
+    for (indices, 0..) |idx, i| sorted_rows[i] = rows[idx];
+
+    const sorted = sqtypes.QueryResult{
+        .rows = sorted_rows,
+        .column_names = result.column_names,
+        .column_kinds = result.column_kinds,
+        .num_fields = result.num_fields,
+        .num_rows = result.num_rows,
+        .affected_rows = result.affected_rows,
+        .insert_id = result.insert_id,
+    };
+    return mod.resultPayload(a, sorted);
 }
 
 pub fn deleteVectorEmbedding(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {

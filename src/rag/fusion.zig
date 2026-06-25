@@ -36,7 +36,12 @@ fn accScalar(a: []const f32, b: []const f32, n: usize) Acc {
 }
 
 /// 8-wide SIMD accumulation with a scalar epilogue for the tail.
+/// Wrapped in `@setFloatMode(.Optimized)` to enable FMA contractions and
+/// reassociation — safe for distance kernels where IEEE strictness is
+/// unnecessary and a ~2× throughput gain from fused multiply-add is available
+/// on modern x86/ARM (per Agent.md §458).
 fn accSimd(a: []const f32, b: []const f32, n: usize) Acc {
+    @setFloatMode(.optimized);
     var vd: Vf = @splat(0);
     var va: Vf = @splat(0);
     var vb: Vf = @splat(0);
@@ -80,6 +85,50 @@ pub fn cosineSimilarity(a: []const f32, b: []const f32) f32 {
 pub fn cosineSimilarityScalar(a: []const f32, b: []const f32) f32 {
     const n = @min(a.len, b.len);
     return finish(accScalar(a, b, n));
+}
+
+// ── Euclidean distance ────────────────────────────────────────────────
+// Also carries a scalar reference and a SIMD path, matching cosine.
+
+fn accEuclideanScalar(a: []const f32, b: []const f32, n: usize) f32 {
+    var sum: f32 = 0;
+    for (0..n) |i| {
+        const d = a[i] - b[i];
+        sum += d * d;
+    }
+    return sum;
+}
+
+fn accEuclideanSimd(a: []const f32, b: []const f32, n: usize) f32 {
+    @setFloatMode(.optimized);
+    var v: Vf = @splat(0);
+    var i: usize = 0;
+    while (i + lanes <= n) : (i += lanes) {
+        const x: Vf = a[i..][0..lanes].*;
+        const y: Vf = b[i..][0..lanes].*;
+        const d = x - y;
+        v += d * d;
+    }
+    var sum: f32 = @reduce(.Add, v);
+    while (i < n) : (i += 1) {
+        const d = a[i] - b[i];
+        sum += d * d;
+    }
+    return sum;
+}
+
+/// Euclidean (L2) distance. Compares over `min(a.len, b.len)` components.
+/// Returns the square root of the sum of squared differences.
+pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
+    const n = @min(a.len, b.len);
+    const sum = accEuclideanSimd(a, b, n);
+    return if (std.math.isFinite(sum)) @sqrt(sum) else std.math.inf(f32);
+}
+
+/// Scalar-path euclidean distance — test oracle for the SIMD kernel.
+pub fn euclideanDistanceScalar(a: []const f32, b: []const f32) f32 {
+    const n = @min(a.len, b.len);
+    return @sqrt(accEuclideanScalar(a, b, n));
 }
 
 // ── Reciprocal Rank Fusion ────────────────────────────────────────────
@@ -225,6 +274,39 @@ test "cosine: SIMD path matches scalar oracle on a 384-wide vector" {
         y.* = rnd.float(f32) * 2 - 1;
     }
     try testing.expectApproxEqAbs(cosineSimilarityScalar(&a, &b), cosineSimilarity(&a, &b), 1e-5);
+}
+
+test "euclidean: identity is zero" {
+    const a = [_]f32{ 1, 2, 3, 4 };
+    try testing.expectApproxEqAbs(@as(f32, 0), euclideanDistance(&a, &a), 1e-6);
+}
+
+test "euclidean: SIMD matches scalar" {
+    var a: [384]f32 = undefined;
+    var b: [384]f32 = undefined;
+    var prng = std.Random.DefaultPrng.init(0xE5);
+    const rnd = prng.random();
+    for (&a, &b) |*x, *y| {
+        x.* = rnd.float(f32) * 10;
+        y.* = rnd.float(f32) * 10;
+    }
+    try testing.expectApproxEqAbs(euclideanDistanceScalar(&a, &b), euclideanDistance(&a, &b), 1e-4);
+}
+
+test "euclidean: tail handling" {
+    var a: [11]f32 = undefined;
+    var b: [11]f32 = undefined;
+    for (&a, &b, 0..) |*x, *y, i| {
+        x.* = @floatFromInt(i + 1);
+        y.* = @floatFromInt((i % 3) + 1);
+    }
+    try testing.expectApproxEqAbs(euclideanDistanceScalar(&a, &b), euclideanDistance(&a, &b), 1e-5);
+}
+
+test "euclidean: zero vector vs unit" {
+    const z = [_]f32{ 0, 0, 0 };
+    const u = [_]f32{ 1, 0, 0 };
+    try testing.expectApproxEqAbs(@as(f32, 1), euclideanDistance(&z, &u), 1e-6);
 }
 
 test "cosine: tail handling for non-multiple-of-8 lengths" {
