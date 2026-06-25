@@ -213,10 +213,10 @@ test "handleRequest: tools/list returns tool registry" {
 
     const resp = handle(testing.allocator, "{\"method\":\"tools/list\",\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
-    try testing.expect(contains(resp, "execute_query"));
-    try testing.expect(contains(resp, "list_tables"));
-    try testing.expect(contains(resp, "create_table"));
     try testing.expect(contains(resp, "vector_search"));
+    try testing.expect(contains(resp, "create_entities"));
+    try testing.expect(contains(resp, "rag_search"));
+    try testing.expect(contains(resp, "doc_detect_format"));
 }
 
 // ---- ping -----------------------------------------------------------------

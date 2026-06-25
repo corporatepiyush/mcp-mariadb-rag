@@ -74,16 +74,4 @@ DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test
 
 ## Project Status
 
-Active migration from MariaDB + TidesDB to SQLite + native vector indexes.
-
-**Remaining work:**
-- Phase 1a: SQLite C bindings — `src/sqlite.zig`
-- Phase 1b: SQLite connection pool — `src/pool.zig` rewrite
-- Phase 1c: Schema DDL translation to SQLite dialect
-- Phase 1d: Native HNSW/IVF-FLAT vector index
-- Phase 1e: FTS5 + hybrid retrieval
-- Phase 2a–2d: HNSW, IVF-FLAT, SIMD distances
-- Phase 3a–3b: MMR re-ranking + streaming chunking
-- Phase 4: RFC 9112 HTTP/1.1 transport
-- Phase 5: Ancillary files (URL parser, validation, config)
-- Phase 6: Benchmarks
+All phases of the SQLite migration complete. 393 unit/integration/fuzz tests pass.

@@ -16,7 +16,7 @@ fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
         schema_kg.writeCreateTypeDict,
         schema_kg.writeCreateGraphStat,
         schema_kg.writeCreateVectorEmbedding,
-        // RAG document/chunk store shares the same engine and init path.
+        // RAG document/chunk store same init path.
         schema_rag.writeCreateDocument,
         schema_rag.writeCreateChunk,
     }) |write_fn| {

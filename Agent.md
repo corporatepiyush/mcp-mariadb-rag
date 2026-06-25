@@ -609,7 +609,7 @@ Remaining risk: prefix check only validates the *first word*. Statements like SE
 - Arena allocations: no individual free needed (arena reset frees all).
 - Stack allocations: no free needed.
 - Heap-allocated strings: explicit `allocator.free` matching the `allocator.dupe`/`allocator.create`.
-- C library handles: freed with the C destructor (`mysql_close`, `free_result`), never with a Zig allocator.
+- C library handles: freed with the C destructor (`sqlite3_close_v2`), never with a Zig allocator.
 
 **No shared ownership:** every value has exactly one owner at any point. The pool owns connections; the handler borrows them temporarily. The arena owns request-scoped data. The caller owns the response payload. No reference counting, no garbage collection, no shared pointers.
 
@@ -671,10 +671,8 @@ Every pure function that processes untrusted input should have property-based fu
 
 **Cross-platform testing with containers:** Use Docker or Podman to validate the binary on Linux when developing on macOS (or vice versa). Build and run inside a container matching the target OS distribution to catch platform-specific issues early:
 - Build the release binary on the host, then copy it into a minimal container (`FROM scratch`, `FROM alpine`, or `FROM distroless`) to verify it links and starts correctly.
-- Test against the target database (MariaDB/MySQL) running in a separate container — use `docker compose` or `podman-compose` to spin up db + app with a test-specific network.
 - Validate that `zig build test` passes inside the target container, not just on the development host. Different libc versions, page sizes, and thread-local-storage layouts can surface latent bugs.
 - Use multi-arch builds (`docker buildx` or `podman farm`) when targeting ARM64 from x86-64 or vice versa.
-- For CI, run the full test suite in a container that matches the deployment environment: same distro, same libmariadb version, same allocator settings. This catches regressions that only reproduce under the target libc or kernel version.
 
 **Microbenchmarking:** Use RDTSCP / CNTVCT_EL0. Pin to isolated cores, disable frequency scaling, warm up caches. Report median + percentiles, not mean. Statistical significance for variants.
 

@@ -20,7 +20,7 @@ fn parseJson(allocator: std.mem.Allocator, src: []const u8) Value {
 }
 
 /// Build an `upsert_vector_embedding` args JSON string with a full 384-dim
-/// embedding (every component set to `fill`), matching the `VECTOR(384)` schema.
+/// embedding (every component set to `fill`), matching the 384-dim BLOB schema.
 fn vectorArgs(allocator: std.mem.Allocator, id: []const u8, entity: []const u8, text: []const u8, fill: f32) ![]u8 {
     var aw = Writer.Allocating.init(allocator);
     const w = &aw.writer;
@@ -388,7 +388,7 @@ test "kg_integration: vector upsert by string id replaces in place" {
     defer arena.deinit();
     const a = arena.allocator();
 
-    // The schema's VECTOR(384) column requires exactly 384 dimensions, so build
+    // The schema's 384-dim BLOB column requires exactly 384 dimensions, so build
     // the args JSON with a full-length embedding rather than a toy 3-vector.
     const v1 = try vectorArgs(a, "vec1", "Alice", "hello", 0.1);
     try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v1)).is_error);
@@ -407,4 +407,121 @@ test "kg_integration: vector upsert by string id replaces in place" {
     try testing.expect(!del.is_error);
     const cnt2 = try conn.query(a, "SELECT COUNT(*) FROM `rag_vector_embedding`");
     try testing.expectEqualStrings("0", cnt2.rows.?[0].values[0].?);
+}
+
+/// Build a JSON string for a vectorSearch args with a query vector of `fill` repeated 384 times.
+fn vectorSearchArgs(allocator: std.mem.Allocator, fill: f32, limit: u64, metric: []const u8) ![]u8 {
+    var aw = Writer.Allocating.init(allocator);
+    const w = &aw.writer;
+    try w.print("{{\"vector\":[", .{});
+    for (0..384) |i| {
+        if (i > 0) try w.writeByte(',');
+        try w.print("{d}", .{fill});
+    }
+    try w.print("],\"limit\":{d},\"metric\":\"{s}\"}}", .{ limit, metric });
+    return aw.toOwnedSlice();
+}
+
+test "kg_integration: vectorSearch returns results in ascending distance order" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Query vector: all 0.5s
+    const query_fill: f32 = 0.5;
+
+    // Insert three vectors at different distances from query:
+    //   close:  all 0.55 → euclidean = 384*(0.05²)   ≈ 0.96
+    //   medium: all 0.9  → euclidean = 384*(0.40²)   ≈ 7.68
+    //   far:    all 0.1  → euclidean = 384*(0.40²)   ≈ 7.68 (same dist as medium)
+    // Use a different medium value to ensure three distinct distances.
+    //   close:  all 0.55 → dist ≈ 0.96
+    //   medium: all 0.8  → dist ≈ 384*(0.3²) = 5.88
+    //   far:    all 0.05 → dist ≈ 384*(0.45²) = 7.68
+    const v_close = try vectorArgs(a, "v_close", "Close", "nearest", 0.55);
+    const v_medium = try vectorArgs(a, "v_medium", "Medium", "middle", 0.8);
+    const v_far = try vectorArgs(a, "v_far", "Far", "farthest", 0.05);
+
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v_close)).is_error);
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v_medium)).is_error);
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v_far)).is_error);
+
+    // Search with euclidean metric, limit > 3 to return all.
+    const args = try vectorSearchArgs(a, query_fill, 10, "euclidean");
+    const res = kg.vectorSearch(io, a, &conn, parseJson(a, args));
+    try testing.expect(!res.is_error);
+
+    const parsed = try std.json.parseFromSlice(Value, a, res.text, .{});
+    const rows = parsed.value.object.get("rows").?.array;
+
+    // Must return at least 3 rows
+    try testing.expect(rows.items.len >= 3);
+
+    // First three rows should be close, medium, far (ascending euclidean distance)
+    const id0 = rows.items[0].array.items[0].string; // id
+    const id1 = rows.items[1].array.items[0].string;
+    const id2 = rows.items[2].array.items[0].string;
+
+    try testing.expectEqualStrings("v_close", id0);
+    try testing.expectEqualStrings("v_medium", id1);
+    try testing.expectEqualStrings("v_far", id2);
+}
+
+test "kg_integration: vectorSearch returns results in ascending cosine distance order" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Query vector: all 1.0s
+    // close: all 1.0 → identical → cosine = 1.0  → dist = 0.0
+    // far:   all 0.0 → opposite  → cosine = 0.0  → dist = 1.0
+    const v_identical = try vectorArgs(a, "v_ident", "Same", "identical", 1.0);
+    const v_opposite = try vectorArgs(a, "v_opp", "Opposite", "far", 0.0);
+
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v_identical)).is_error);
+    try testing.expect(!kg.upsertVectorEmbedding(io, a, &conn, parseJson(a, v_opposite)).is_error);
+
+    const args = try vectorSearchArgs(a, 1.0, 10, "cosine");
+    const res = kg.vectorSearch(io, a, &conn, parseJson(a, args));
+    try testing.expect(!res.is_error);
+
+    const parsed = try std.json.parseFromSlice(Value, a, res.text, .{});
+    const rows = parsed.value.object.get("rows").?.array;
+    try testing.expect(rows.items.len >= 2);
+
+    // Identical vector (cosine distance 0) should sort before opposite (cosine distance 1)
+    try testing.expectEqualStrings("v_ident", rows.items[0].array.items[0].string);
+    try testing.expectEqualStrings("v_opp", rows.items[1].array.items[0].string);
 }

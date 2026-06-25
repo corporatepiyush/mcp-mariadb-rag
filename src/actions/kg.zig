@@ -16,7 +16,7 @@ const PooledConn = pool.PooledConnection;
 const Payload = mod.Payload;
 const Writer = std.Io.Writer;
 
-/// Maximum embedding dimensionality (matches `VECTOR(384)` in the schema).
+/// Maximum embedding dimensionality (matches the 384-dim BLOB schema).
 const vector_dims = 384;
 
 /// Parse a JSON array of numbers into a fixed-capacity f32 buffer, returning the

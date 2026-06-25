@@ -58,7 +58,7 @@ fn getFloatParam(args: ?Value, name: []const u8, default: f32) f32 {
 
 const EmbedError = error{ BadDim, NotNumber, OutOfMemory };
 
-/// Parse a JSON array into an owned `[dims]`-length embedding. The VECTOR(384)
+/// Parse a JSON array into an owned `[dims]`-length embedding. The 384-dim BLOB
 /// column requires an exact match, so a wrong length is a hard error.
 fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
     if (val != .array) return error.NotNumber;
