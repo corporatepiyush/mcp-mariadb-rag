@@ -87,7 +87,7 @@ pub fn writeCreateVectorEmbedding(w: *Writer) !void {
         \\    id TEXT NOT NULL PRIMARY KEY,
         \\    entity_name TEXT NOT NULL,
         \\    text_content TEXT NOT NULL,
-        \\    embedding TEXT NOT NULL,
+        \\    embedding BLOB NOT NULL,
         \\    created_at TEXT DEFAULT (datetime('now'))
         \\)
     );
@@ -205,7 +205,7 @@ test "writeCreateVectorEmbedding" {
         \\    id TEXT NOT NULL PRIMARY KEY,
         \\    entity_name TEXT NOT NULL,
         \\    text_content TEXT NOT NULL,
-        \\    embedding TEXT NOT NULL,
+        \\    embedding BLOB NOT NULL,
         \\    created_at TEXT DEFAULT (datetime('now'))
         \\)
     ,

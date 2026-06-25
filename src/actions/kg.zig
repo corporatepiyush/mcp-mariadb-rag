@@ -585,19 +585,13 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     return reorderKgRows(allocator, result, vec_slice, is_euclidean);
 }
 
-/// Parse `[v0,v1,...]` text into an owned float slice.
-fn parseEmbText(a: Allocator, text: []const u8) ![]f32 {
-    const trimmed = std.mem.trim(u8, text, " []");
-    if (trimmed.len == 0) return &.{};
-    var count: usize = 1;
-    for (trimmed) |c| {
-        if (c == ',') count += 1;
-    }
-    const out = try a.alloc(f32, count);
-    var it = std.mem.splitScalar(u8, trimmed, ',');
-    var i: usize = 0;
-    while (it.next()) |part| : (i += 1) out[i] = std.fmt.parseFloat(f32, std.mem.trim(u8, part, " ")) catch 0;
-    return out[0..i];
+/// Interpret raw f32 blob bytes as a float slice.
+fn embFromBlob(a: Allocator, blob: []const u8) ![]f32 {
+    const n = blob.len / @sizeOf(f32);
+    if (n == 0 or blob.len % @sizeOf(f32) != 0) return error.InvalidBlob;
+    const out = try a.alloc(f32, n);
+    @memcpy(std.mem.sliceAsBytes(out), blob);
+    return out;
 }
 
 fn reorderKgRows(a: Allocator, result: pool.QueryResult, qvec: []const f32, is_euclidean: bool) Payload {
@@ -612,7 +606,7 @@ fn reorderKgRows(a: Allocator, result: pool.QueryResult, qvec: []const f32, is_e
     defer a.free(valid);
 
     for (rows, 0..) |row, i| {
-        const emb = parseEmbText(a, row.values[3] orelse "") catch {
+        const emb = embFromBlob(a, row.values[3] orelse "") catch {
             valid[i] = false;
             continue;
         };

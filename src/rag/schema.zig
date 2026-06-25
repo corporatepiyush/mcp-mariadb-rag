@@ -33,7 +33,7 @@ pub fn writeCreateChunk(w: *Writer) !void {
         \\    ordinal INTEGER NOT NULL DEFAULT 0,
         \\    content TEXT NOT NULL,
         \\    token_count INTEGER NOT NULL DEFAULT 0,
-        \\    embedding TEXT NOT NULL,
+        \\    embedding BLOB NOT NULL,
         \\    created_at TEXT DEFAULT (datetime('now'))
         \\)
     );
@@ -59,14 +59,14 @@ test "writeCreateDocument" {
     try testing.expect(std.mem.indexOf(u8, result, "AUTO_INCREMENT") == null);
 }
 
-test "writeCreateChunk stores embedding as TEXT" {
+test "writeCreateChunk stores embedding as BLOB" {
     var buf: [1024]u8 = undefined;
     var w = Writer.fixed(&buf);
     try writeCreateChunk(&w);
     const result = w.buffered();
     try testing.expect(std.mem.indexOf(u8, result, "CREATE TABLE IF NOT EXISTS `rag_chunk`") != null);
     try testing.expect(std.mem.indexOf(u8, result, "id TEXT NOT NULL PRIMARY KEY") != null);
-    try testing.expect(std.mem.indexOf(u8, result, "embedding TEXT NOT NULL") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "embedding BLOB NOT NULL") != null);
     try testing.expect(std.mem.indexOf(u8, result, "AUTO_INCREMENT") == null);
 }
 

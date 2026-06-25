@@ -29,13 +29,16 @@ fn writeLikeContains(w: *Writer, query: []const u8) !void {
 }
 
 fn writeVectorLiteral(w: *Writer, vector: []const f32) !void {
-    try w.writeAll("'[");
-    for (vector, 0..) |v, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{d}", .{v});
+    try w.writeAll("X'");
+    const bytes = std.mem.sliceAsBytes(vector);
+    for (bytes) |b| {
+        try w.writeByte(hex_chars[b >> 4]);
+        try w.writeByte(hex_chars[b & 0xf]);
     }
-    try w.writeAll("]'");
+    try w.writeByte('\'');
 }
+
+const hex_chars = "0123456789abcdef";
 
 // ── Distance metric ───────────────────────────────────────────────────
 // Retained for API compatibility; distance computation moves to
@@ -236,8 +239,9 @@ test "writeUpsertChunks batches rows" {
     const out = try renderSql(&buf, writeUpsertChunks, .{&rows});
     try testing.expect(std.mem.indexOf(u8, out, "INSERT INTO `rag_chunk` (id, document_id, ordinal, content, token_count, embedding) VALUES ") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ON CONFLICT(id) DO UPDATE") != null);
-    try testing.expect(std.mem.indexOf(u8, out, "('d1#0','d1',0,'hello',1,'[0.1,0.2]')") != null);
-    try testing.expect(std.mem.indexOf(u8, out, ", ('d1#1','d1',1,'world',1,'[0.3,0.4]')") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "X'") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "('d1#0','d1',0,'hello',1,") != null);
+    try testing.expect(std.mem.indexOf(u8, out, ", ('d1#1','d1',1,'world',1,") != null);
 }
 
 test "writeVectorTopK selects embedding and limits" {

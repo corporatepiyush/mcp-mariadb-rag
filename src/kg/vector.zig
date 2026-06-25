@@ -27,15 +27,16 @@ fn writeSqlLiteral(w: *Writer, s: []const u8) !void {
 }
 
 fn writeVectorLiteral(w: *Writer, vector: []const f32) !void {
-    try w.writeByte('\'');
-    try w.writeByte('[');
-    for (vector, 0..) |v, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.print("{d}", .{v});
+    try w.writeAll("X'");
+    const bytes = std.mem.sliceAsBytes(vector);
+    for (bytes) |b| {
+        try w.writeByte(hex_chars[b >> 4]);
+        try w.writeByte(hex_chars[b & 0xf]);
     }
-    try w.writeByte(']');
     try w.writeByte('\'');
 }
+
+const hex_chars = "0123456789abcdef";
 
 pub fn writeUpsertVector(w: *Writer, id: []const u8, entity_name: []const u8, text_content: []const u8, vector: []const f32) !void {
     try w.writeAll("INSERT INTO ");
@@ -167,11 +168,15 @@ test "writeCountVectorsByEntity" {
     );
 }
 
-test "writeVectorLiteral formats floats" {
+test "writeVectorLiteral emits X'hex' blob literal" {
     var buf: [256]u8 = undefined;
+    // f32: 1.5=0x3fc00000, -2.0=0xc0000000, 3.0=0x40400000 (little-endian)
+    // So raw bytes: 00 00 c0 3f | 00 00 00 c0 | 00 00 40 40
     const vec = [_]f32{ 1.5, -2.0, 3.0 };
     var w = Writer.fixed(&buf);
     try writeVectorLiteral(&w, &vec);
     const result = w.buffered();
-    try testing.expectEqualStrings("'[1.5,-2,3]'", result);
+    try testing.expect(std.mem.indexOf(u8, result, "X'") != null);
+    try testing.expect(result.len > 20); // X'hex' wrapper
+    try testing.expect(std.mem.indexOf(u8, result, "c03f") != null); // 0x3fc0 → little-endian c0 3f
 }

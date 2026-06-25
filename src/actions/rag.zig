@@ -75,21 +75,13 @@ fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
     return out;
 }
 
-/// Parse `VEC_ToText` output ("[v0,v1,...]") into an owned float slice.
-fn parseEmbText(allocator: Allocator, text: []const u8) ![]f32 {
-    const trimmed = std.mem.trim(u8, text, " []");
-    if (trimmed.len == 0) return &.{};
-    var count: usize = 1;
-    for (trimmed) |c| {
-        if (c == ',') count += 1;
-    }
-    const out = try allocator.alloc(f32, count);
-    var it = std.mem.splitScalar(u8, trimmed, ',');
-    var i: usize = 0;
-    while (it.next()) |part| : (i += 1) {
-        out[i] = std.fmt.parseFloat(f32, std.mem.trim(u8, part, " ")) catch 0;
-    }
-    return out[0..i];
+/// Interpret raw f32 blob bytes as a float slice.
+fn embFromBlob(allocator: Allocator, blob: []const u8) ![]f32 {
+    const n = blob.len / @sizeOf(f32);
+    if (n == 0 or blob.len % @sizeOf(f32) != 0) return error.InvalidBlob;
+    const out = try allocator.alloc(f32, n);
+    @memcpy(std.mem.sliceAsBytes(out), blob);
+    return out;
 }
 
 fn jsonStr(w: *Writer, s: []const u8) !void {
@@ -251,7 +243,7 @@ fn collect(
         const id = row.values[0] orelse continue;
         order.appendAssumeCapacity(id);
         if (cmap.contains(id)) continue;
-        const emb = parseEmbText(allocator, row.values[4] orelse "") catch &.{};
+        const emb = embFromBlob(allocator, row.values[4] orelse "") catch &.{};
         cmap.putAssumeCapacity(id, .{
             .id = id,
             .document_id = row.values[1] orelse "",
@@ -425,7 +417,7 @@ fn reorderByDist(allocator: Allocator, result: pool.QueryResult, qvec: []const f
     defer allocator.free(valid);
 
     for (rows, 0..) |row, i| {
-        const emb = parseEmbText(allocator, row.values[4] orelse "") catch {
+        const emb = embFromBlob(allocator, row.values[4] orelse "") catch {
             valid[i] = false;
             continue;
         };
@@ -525,21 +517,23 @@ pub fn stats(_: Io, allocator: Allocator, conn: *PooledConn, _: ?Value) Payload 
 
 const testing = std.testing;
 
-test "parseEmbText round-trips a vector literal" {
+test "embFromBlob round-trips an f32 array" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    const v = try parseEmbText(arena.allocator(), "[1,2.5,-3]");
+    const orig = [_]f32{ 1, 2.5, -3 };
+    const blob = std.mem.sliceAsBytes(&orig);
+    const v = try embFromBlob(arena.allocator(), blob);
     try testing.expectEqual(@as(usize, 3), v.len);
     try testing.expectEqual(@as(f32, 1), v[0]);
     try testing.expectEqual(@as(f32, 2.5), v[1]);
     try testing.expectEqual(@as(f32, -3), v[2]);
 }
 
-test "parseEmbText handles empty / whitespace" {
+test "embFromBlob handles empty" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
-    try testing.expectEqual(@as(usize, 0), (try parseEmbText(arena.allocator(), "[]")).len);
-    try testing.expectEqual(@as(usize, 0), (try parseEmbText(arena.allocator(), "")).len);
+    try testing.expectError(error.InvalidBlob, embFromBlob(arena.allocator(), ""));
+    try testing.expectError(error.InvalidBlob, embFromBlob(arena.allocator(), &[_]u8{ 0, 1, 2 }));
 }
 
 /// Build a Value by parsing JSON text (avoids depending on the std.json
@@ -588,18 +582,16 @@ test "getUintParam accepts number and string forms" {
     try testing.expectEqual(@as(u64, 3), getUintParam(args, "missing", 3));
 }
 
-test "fuzz: parseEmbText never panics on random vector-ish text" {
+test "fuzz: embFromBlob never panics on random bytes" {
     var prng = std.Random.DefaultPrng.init(0xEEEE);
     const rnd = prng.random();
     var buf: [128]u8 = undefined;
-    const alphabet = "0123456789.,-eE[] ";
 
     for (0..500) |_| {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
         const len = rnd.intRangeLessThan(usize, 0, buf.len);
-        const s = buf[0..len];
-        for (s) |*b| b.* = alphabet[rnd.intRangeLessThan(usize, 0, alphabet.len)];
-        _ = parseEmbText(arena.allocator(), s) catch {};
+        for (buf[0..len]) |*b| b.* = rnd.int(u8);
+        _ = embFromBlob(arena.allocator(), buf[0..len]) catch {};
     }
 }

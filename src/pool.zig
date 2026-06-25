@@ -88,7 +88,11 @@ pub const DatabaseConn = struct {
                 const col_type = sqlite.sqlite3_column_type(stmt, ci);
                 values[i] = if (col_type == sqlite.SQLITE_NULL)
                     null
-                else blk: {
+                else if (col_type == sqlite.SQLITE_BLOB) blk: {
+                    const ptr = @as([*]const u8, @ptrCast(sqlite.sqlite3_column_blob(stmt, ci)));
+                    const len = @as(usize, @intCast(sqlite.sqlite3_column_bytes(stmt, ci)));
+                    break :blk try allocator.dupe(u8, ptr[0..len]);
+                } else blk: {
                     const ptr = sqlite.sqlite3_column_text(stmt, ci);
                     const len = @as(usize, @intCast(sqlite.sqlite3_column_bytes(stmt, ci)));
                     break :blk try allocator.dupe(u8, ptr[0..len]);
