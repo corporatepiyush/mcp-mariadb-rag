@@ -1,32 +1,30 @@
 const std = @import("std");
 const testing = std.testing;
 const actions = @import("../src/actions/mod.zig");
-const stubs = @import("../src/actions/stubs.zig");
 
 const Writer = std.Io.Writer;
 
 // ---- isWriteTool ----------------------------------------------------------
 
 test "isWriteTool: known write tools return true" {
-    try testing.expect(actions.isWriteTool("create_table"));
-    try testing.expect(actions.isWriteTool("drop_table"));
-    try testing.expect(actions.isWriteTool("execute_insert"));
-    try testing.expect(actions.isWriteTool("execute_update"));
-    try testing.expect(actions.isWriteTool("execute_delete"));
-    try testing.expect(actions.isWriteTool("create_index"));
-    try testing.expect(actions.isWriteTool("drop_index"));
-    try testing.expect(actions.isWriteTool("create_schema"));
-    try testing.expect(actions.isWriteTool("drop_schema"));
-    try testing.expect(actions.isWriteTool("create_view"));
-    try testing.expect(actions.isWriteTool("drop_view"));
+    try testing.expect(actions.isWriteTool("create_entities"));
+    try testing.expect(actions.isWriteTool("create_relations"));
+    try testing.expect(actions.isWriteTool("delete_entities"));
+    try testing.expect(actions.isWriteTool("add_observations"));
+    try testing.expect(actions.isWriteTool("delete_observations"));
+    try testing.expect(actions.isWriteTool("upsert_vector_embedding"));
+    try testing.expect(actions.isWriteTool("delete_vector_embedding"));
+    try testing.expect(actions.isWriteTool("rag_ingest_document"));
+    try testing.expect(actions.isWriteTool("rag_upsert_chunks"));
+    try testing.expect(actions.isWriteTool("rag_delete_document"));
 }
 
 test "isWriteTool: non-write tools return false" {
-    try testing.expect(!actions.isWriteTool("execute_query"));
-    try testing.expect(!actions.isWriteTool("list_tables"));
-    try testing.expect(!actions.isWriteTool("describe_table"));
-    try testing.expect(!actions.isWriteTool("list_schemas"));
-    try testing.expect(!actions.isWriteTool("explain_query"));
+    try testing.expect(!actions.isWriteTool("vector_search"));
+    try testing.expect(!actions.isWriteTool("fulltext_search"));
+    try testing.expect(!actions.isWriteTool("rag_search"));
+    try testing.expect(!actions.isWriteTool("doc_extract_text"));
+    try testing.expect(!actions.isWriteTool("doc_detect_format"));
 }
 
 test "isWriteTool: unknown tool returns false" {
@@ -177,14 +175,6 @@ test "getArrayParam: array value" {
     const v = actions.getArrayParam(std.json.Value{ .object = map }, "items");
     try testing.expect(v != null);
     try testing.expectEqual(@as(usize, 1), v.?.items.len);
-}
-
-// ---- stubs ----------------------------------------------------------------
-
-test "stubs.notImpl" {
-    const p = stubs.notImpl(undefined, testing.allocator, undefined, null);
-    try testing.expect(p.is_error);
-    try testing.expectEqualStrings("Not yet implemented", p.text);
 }
 
 // ---- renderToOwned --------------------------------------------------------

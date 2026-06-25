@@ -36,7 +36,7 @@ pub const SQLITE_BLOB = 4;
 pub const SQLITE_NULL = 5;
 
 pub const SQLITE_TRANSIENT: ?*anyopaque = @ptrFromInt(~@as(usize, 0));
-pub const SQLITE_STATIC: ?*anyopaque = null;
+pub const SQLITE_STATIC: ?*anyopaque = @ptrFromInt(0);
 
 pub const Error = error{
     SqliteBusy,
@@ -77,32 +77,32 @@ pub fn check(rc: c_int) Error!void {
     };
 }
 
-extern "c" fn sqlite3_open_v2(path: [*:0]const u8, ppDb: *?*sqlite3, flags: c_int, zVfs: ?[*:0]const u8) c_int;
-extern "c" fn sqlite3_close_v2(db: ?*sqlite3) c_int;
-extern "c" fn sqlite3_db_handle(stmt: ?*sqlite3_stmt) ?*sqlite3;
-extern "c" fn sqlite3_exec(db: ?*sqlite3, sql: [*:0]const u8, callback: ?*const fn (?*anyopaque, c_int, **u8, **u8) callconv(.c) c_int, arg: ?*anyopaque, errmsg: ?*?*u8) c_int;
-extern "c" fn sqlite3_prepare_v3(db: ?*sqlite3, sql: [*:0]const u8, nByte: c_int, flags: c_uint, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
-extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
-extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
-extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
-extern "c" fn sqlite3_clear_bindings(stmt: ?*sqlite3_stmt) c_int;
-extern "c" fn sqlite3_bind_int64(stmt: ?*sqlite3_stmt, idx: c_int, val: i64) c_int;
-extern "c" fn sqlite3_bind_double(stmt: ?*sqlite3_stmt, idx: c_int, val: f64) c_int;
-extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, val: [*]const u8, n: c_int, destructor: ?*anyopaque) c_int;
-extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, val: ?*const anyopaque, n: c_int, destructor: ?*anyopaque) c_int;
-extern "c" fn sqlite3_bind_null(stmt: ?*sqlite3_stmt, idx: c_int) c_int;
-extern "c" fn sqlite3_column_count(stmt: ?*sqlite3_stmt) c_int;
-extern "c" fn sqlite3_column_type(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
-extern "c" fn sqlite3_column_int64(stmt: ?*sqlite3_stmt, iCol: c_int) i64;
-extern "c" fn sqlite3_column_double(stmt: ?*sqlite3_stmt, iCol: c_int) f64;
-extern "c" fn sqlite3_column_text(stmt: ?*sqlite3_stmt, iCol: c_int) [*:0]const u8;
-extern "c" fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
-extern "c" fn sqlite3_column_name(stmt: ?*sqlite3_stmt, iCol: c_int) [*:0]const u8;
-extern "c" fn sqlite3_changes(db: ?*sqlite3) c_int;
-extern "c" fn sqlite3_last_insert_rowid(db: ?*sqlite3) i64;
-extern "c" fn sqlite3_busy_timeout(db: ?*sqlite3, ms: c_int) c_int;
-extern "c" fn sqlite3_errmsg(db: ?*sqlite3) [*:0]const u8;
-extern "c" fn sqlite3_extended_errcode(db: ?*sqlite3) c_int;
+pub extern "c" fn sqlite3_open_v2(path: [*:0]const u8, ppDb: *?*sqlite3, flags: c_int, zVfs: ?[*:0]const u8) c_int;
+pub extern "c" fn sqlite3_close_v2(db: ?*sqlite3) c_int;
+pub extern "c" fn sqlite3_db_handle(stmt: ?*sqlite3_stmt) ?*sqlite3;
+pub extern "c" fn sqlite3_exec(db: ?*sqlite3, sql: [*:0]const u8, callback: ?*const fn (?*anyopaque, c_int, **u8, **u8) callconv(.c) c_int, arg: ?*anyopaque, errmsg: ?*?*u8) c_int;
+pub extern "c" fn sqlite3_prepare_v3(db: ?*sqlite3, sql: [*:0]const u8, nByte: c_int, flags: c_uint, ppStmt: *?*sqlite3_stmt, pzTail: ?*?[*:0]const u8) c_int;
+pub extern "c" fn sqlite3_finalize(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_step(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_reset(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_clear_bindings(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_bind_int64(stmt: ?*sqlite3_stmt, idx: c_int, val: i64) c_int;
+pub extern "c" fn sqlite3_bind_double(stmt: ?*sqlite3_stmt, idx: c_int, val: f64) c_int;
+pub extern "c" fn sqlite3_bind_text(stmt: ?*sqlite3_stmt, idx: c_int, val: [*]const u8, n: c_int, destructor: ?*anyopaque) c_int;
+pub extern "c" fn sqlite3_bind_blob(stmt: ?*sqlite3_stmt, idx: c_int, val: ?*const anyopaque, n: c_int, destructor: ?*anyopaque) c_int;
+pub extern "c" fn sqlite3_bind_null(stmt: ?*sqlite3_stmt, idx: c_int) c_int;
+pub extern "c" fn sqlite3_column_count(stmt: ?*sqlite3_stmt) c_int;
+pub extern "c" fn sqlite3_column_type(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
+pub extern "c" fn sqlite3_column_int64(stmt: ?*sqlite3_stmt, iCol: c_int) i64;
+pub extern "c" fn sqlite3_column_double(stmt: ?*sqlite3_stmt, iCol: c_int) f64;
+pub extern "c" fn sqlite3_column_text(stmt: ?*sqlite3_stmt, iCol: c_int) [*:0]const u8;
+pub extern "c" fn sqlite3_column_bytes(stmt: ?*sqlite3_stmt, iCol: c_int) c_int;
+pub extern "c" fn sqlite3_column_name(stmt: ?*sqlite3_stmt, iCol: c_int) [*:0]const u8;
+pub extern "c" fn sqlite3_changes(db: ?*sqlite3) c_int;
+pub extern "c" fn sqlite3_last_insert_rowid(db: ?*sqlite3) i64;
+pub extern "c" fn sqlite3_busy_timeout(db: ?*sqlite3, ms: c_int) c_int;
+pub extern "c" fn sqlite3_errmsg(db: ?*sqlite3) [*:0]const u8;
+pub extern "c" fn sqlite3_extended_errcode(db: ?*sqlite3) c_int;
 
 pub fn open(path: [*:0]const u8) Error!*sqlite3 {
     var db: ?*sqlite3 = null;

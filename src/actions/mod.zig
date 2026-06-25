@@ -1,11 +1,9 @@
 const std = @import("std");
 const pool = @import("../pool.zig");
 const json = @import("../json.zig");
-const schema = @import("schema.zig");
-const query = @import("query.zig");
-const stubs = @import("stubs.zig");
 const kg = @import("kg.zig");
 const rag = @import("rag.zig");
+const doc = @import("doc.zig");
 
 const Value = std.json.Value;
 const Writer = std.Io.Writer;
@@ -23,53 +21,10 @@ pub const Payload = struct {
 const Handler = *const fn (std.Io, std.mem.Allocator, *pool.PooledConnection, ?Value) Payload;
 
 pub const registry = std.StaticStringMap(Handler).initComptime(.{
-    .{ "list_tables", schema.listTables },
-    .{ "describe_table", schema.describeTable },
-    .{ "list_indexes", schema.listIndexes },
-    .{ "list_schemas", schema.listSchemas },
-    .{ "show_constraints", schema.showConstraints },
-    .{ "list_triggers", schema.listTriggers },
-    .{ "create_table", schema.createTable },
-    .{ "drop_table", schema.dropTable },
-    .{ "create_view", schema.createView },
-    .{ "drop_view", schema.dropView },
-    .{ "create_schema", schema.createSchema },
-    .{ "drop_schema", schema.dropSchema },
-    .{ "create_index", schema.createIndex },
-    .{ "drop_index", schema.dropIndex },
-    .{ "execute_query", query.executeQuery },
-    .{ "execute_insert", query.executeInsert },
-    .{ "execute_update", query.executeUpdate },
-    .{ "execute_delete", query.executeDelete },
-    .{ "explain_query", query.explainQuery },
-    .{ "show_table_status", stubs.notImpl },
-    .{ "show_processlist", stubs.notImpl },
-    .{ "show_variables", stubs.notImpl },
-    .{ "show_status", stubs.notImpl },
-    .{ "show_databases", stubs.notImpl },
-    .{ "show_engines", stubs.notImpl },
-    .{ "list_users", stubs.notImpl },
-    .{ "show_grants", stubs.notImpl },
-    .{ "optimize_table", stubs.notImpl },
-    .{ "analyze_table", stubs.notImpl },
-    .{ "check_table", stubs.notImpl },
-    .{ "flush_tables", stubs.notImpl },
-    .{ "truncate_table", stubs.notImpl },
-    .{ "add_column", stubs.notImpl },
-    .{ "drop_column", stubs.notImpl },
-    .{ "rename_column", stubs.notImpl },
-    .{ "alter_column_type", stubs.notImpl },
-    .{ "rename_table", stubs.notImpl },
-    .{ "create_user", stubs.notImpl },
-    .{ "drop_user", stubs.notImpl },
-    .{ "grant_privileges", stubs.notImpl },
-    .{ "revoke_privileges", stubs.notImpl },
-    .{ "show_locks", stubs.notImpl },
-    .{ "show_transaction_isolation", stubs.notImpl },
+    // ---- Knowledge graph ----
     .{ "vector_search", kg.vectorSearch },
     .{ "bfs_path", kg.bfsPath },
     .{ "fulltext_search", kg.fulltextSearch },
-    .{ "list_fulltext_indexes", stubs.notImpl },
     .{ "create_entities", kg.createEntities },
     .{ "create_relations", kg.createRelations },
     .{ "delete_entities", kg.deleteEntities },
@@ -97,16 +52,15 @@ pub const registry = std.StaticStringMap(Handler).initComptime(.{
     .{ "rag_list_documents", rag.listDocuments },
     .{ "rag_delete_document", rag.deleteDocument },
     .{ "rag_stats", rag.stats },
+    // ---- Document extraction: detect / extract / chunk (native, streaming) ----
+    .{ "doc_detect_format", doc.detectFormat },
+    .{ "doc_extract_text", doc.extractText },
+    .{ "doc_extract_and_chunk", doc.extractAndChunk },
 });
 
+// Tools that mutate persistent state. Document-extraction tools are read-only
+// (they read files and return text), so none appear here.
 const write_names = std.StaticStringMap(void).initComptime(.{
-    .{"create_table"}, .{"drop_table"},  .{"create_view"},      .{"drop_view"},
-    .{"create_schema"}, .{"drop_schema"}, .{"create_index"},     .{"drop_index"},
-    .{"execute_insert"}, .{"execute_update"}, .{"execute_delete"},
-    .{"optimize_table"}, .{"analyze_table"}, .{"check_table"},   .{"flush_tables"},
-    .{"truncate_table"}, .{"add_column"},  .{"drop_column"},      .{"rename_column"},
-    .{"alter_column_type"}, .{"rename_table"}, .{"create_user"},  .{"drop_user"},
-    .{"grant_privileges"}, .{"revoke_privileges"},
     .{"create_entities"}, .{"create_relations"}, .{"delete_entities"},
     .{"delete_relations"}, .{"add_observations"}, .{"delete_observations"},
     .{"upsert_vector_embedding"}, .{"delete_vector_embedding"},
@@ -142,6 +96,19 @@ pub fn renderToOwned(
     errdefer aw.deinit();
     try @call(.auto, write_fn, .{&aw.writer} ++ args);
     return aw.toOwnedSlice();
+}
+
+/// Like `renderToOwned` but yields a success `Payload`, mapping any write/OOM
+/// failure to a uniform serialization error. The common shape for handlers that
+/// build a JSON response into a `*Writer`.
+pub fn renderOwned(
+    allocator: std.mem.Allocator,
+    comptime write_fn: anytype,
+    args: anytype,
+) Payload {
+    const text = renderToOwned(allocator, write_fn, args) catch
+        return errPayload("Serialization error");
+    return .{ .text = text, .is_error = false };
 }
 
 pub fn getStringParam(args: ?Value, name: []const u8) ?[]const u8 {
