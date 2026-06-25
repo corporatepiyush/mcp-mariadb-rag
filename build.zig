@@ -10,6 +10,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.link_libc = true;
+    exe_mod.linkSystemLibrary("sqlite3", .{});
 
     const exe = b.addExecutable(.{
         .name = "mcp-kv",
@@ -29,6 +30,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     test_mod.link_libc = true;
+    test_mod.linkSystemLibrary("sqlite3", .{});
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);

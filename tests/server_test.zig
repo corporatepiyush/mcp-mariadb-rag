@@ -298,7 +298,7 @@ test "handleRequest: tools/call known tool returns pool error" {
     var cfg = createTestConfig(testing.allocator);
     defer cfg.deinit(testing.allocator);
 
-    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"list_tables\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
+    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"search_nodes\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
     try testing.expect(contains(resp, "-32001"));
     try testing.expect(contains(resp, "Pool error"));
@@ -339,7 +339,7 @@ test "handleRequest: restricted mode blocks write tool" {
     };
     defer cfg.deinit(testing.allocator);
 
-    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"create_table\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
+    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"create_entities\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
     try testing.expect(contains(resp, "Write operations not allowed"));
     try testing.expect(contains(resp, "isError"));
@@ -377,7 +377,7 @@ test "handleRequest: restricted mode allows read tool" {
     };
     defer cfg.deinit(testing.allocator);
 
-    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"list_tables\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
+    const resp = handle(testing.allocator, "{\"method\":\"tools/call\",\"params\":{\"name\":\"search_nodes\"},\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
     try testing.expect(!contains(resp, "Write operations not allowed"));
     try testing.expect(contains(resp, "Pool error"));

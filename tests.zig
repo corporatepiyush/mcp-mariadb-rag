@@ -3,6 +3,7 @@
 
 comptime {
     // ---- Source module inline tests --------------------------------------
+    _ = @import("src/sqlite.zig");
     _ = @import("src/json.zig");
     _ = @import("src/url.zig");
     _ = @import("src/validation.zig");
