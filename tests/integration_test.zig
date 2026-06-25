@@ -1,9 +1,9 @@
-//! Integration tests that require a live MariaDB instance.
+//! Integration tests that exercise the full stack (SQLite + FTS5 + vector index).
 //!
 //! Gated on the `DATABASE_URL` environment variable. When unset, the test
 //! silently passes (skips). Run with:
 //!
-//!     DATABASE_URL="mysql://user:pass@host:port/db" zig build test
+//!     DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test
 //!
 //! The database specified in the URL must exist; no tables are created by
 //! these tests.
@@ -115,7 +115,6 @@ test "integration: handleRequest initialize roundtrip" {
 
     var cfg = config_mod.Config{
         .database_url = testing.allocator.dupe(u8, url) catch unreachable,
-        .default_engine = testing.allocator.dupe(u8, "InnoDB") catch unreachable,
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,

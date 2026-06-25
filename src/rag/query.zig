@@ -1,9 +1,10 @@
 //! SQL generation for the RAG document/chunk store.
 //!
 //! Mirrors the KG layer's split: every `write*` emits one statement into a
-//! `*std.Io.Writer`, so the SQL is unit-testable without a live MariaDB. All
-//! user-derived text is escaped for the single-quoted literal context; vectors
-//! are emitted via `Vec_FromText('[...]')` and read back via `VEC_ToText`.
+//! `*std.Io.Writer`, so the SQL is unit-testable without a live database.
+//! User-derived text is escaped for the single-quoted literal context.
+//! Vectors are stored as f32 BLOBs and indexed via the in-memory HNSW/IVF-FLAT
+//! index (not SQL VEC_* functions — Phase 1d/1e).
 
 const std = @import("std");
 const validation = @import("../validation.zig");
@@ -19,8 +20,8 @@ fn writeSqlLiteral(w: *Writer, s: []const u8) !void {
     try w.writeByte('\'');
 }
 
-/// `LIKE '%<q>%'` as a single escaped literal (never `||` — MariaDB reads that
-/// as logical OR by default). Matches the KG layer's lexical-search convention.
+/// `LIKE '%<q>%'` as a single escaped literal. Matches the KG layer's
+/// lexical-search convention.
 fn writeLikeContains(w: *Writer, query: []const u8) !void {
     try w.writeAll("LIKE '%");
     try validation.writeEscapedLiteral(w, query);

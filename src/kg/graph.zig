@@ -5,7 +5,7 @@
 //! statements themselves.
 //!
 //! Generation and execution are separated so SQL logic is testable without a
-//! live MariaDB connection (unit tests cover the `write*` functions; e2e
+//! live database connection (unit tests cover the `write*` functions; e2e
 //! integration tests cover both sides).
 
 const std = @import("std");
@@ -47,11 +47,10 @@ fn writeSqlLiteral(w: *Writer, s: []const u8) !void {
 /// Write a `LIKE '%<query>%'` substring (contains) pattern as a single escaped
 /// literal.
 ///
-/// MariaDB's `||` is *logical OR* by default (string concatenation requires the
-/// non-default `PIPES_AS_CONCAT`/ANSI sql_mode), so the pattern must be built as
-/// one literal — `LIKE '%' || q || '%'` would silently evaluate to `LIKE 0`.
-/// The query is escaped for the string-literal context; `%`/`_` inside it keep
-/// their wildcard meaning, preserving the original substring-search intent.
+/// SQLite's `||` is string concatenation (safe to use), but building the
+/// pattern as a single literal avoids any dialect confusion. The query is
+/// escaped for the string-literal context; `%`/`_` inside it keep their
+/// wildcard meaning, preserving the original substring-search intent.
 fn writeLikeContains(w: *Writer, query: []const u8) !void {
     try w.writeAll("LIKE '%");
     try validation.writeEscapedLiteral(w, query);
@@ -898,13 +897,13 @@ test "writeFulltextSearch" {
     const result = try renderSql(&buf, writeFulltextSearch, .{ "alice", 10 });
     try testing.expect(std.mem.indexOf(u8, result, "SELECT DISTINCT e.name") != null);
     try testing.expect(std.mem.indexOf(u8, result, "LIKE '%alice%'") != null);
-    // No bare `||` — MariaDB would read it as logical OR by default.
+    // No bare `||` in LIKE patterns — build as a single literal.
     try testing.expect(std.mem.indexOf(u8, result, "||") == null);
     try testing.expect(std.mem.indexOf(u8, result, "JOIN `rag_observation` o ON o.entity_name = e.name") != null);
     try testing.expect(std.mem.indexOf(u8, result, "LIMIT 10") != null);
 }
 
-// -- Concat-bug regression: search must not emit MariaDB's logical-OR `||` -----
+// -- Regression: search must not emit bare `||` in LIKE patterns -----------------
 
 test "writeSearchEntities builds a single LIKE literal, never `||`" {
     var buf: [2048]u8 = undefined;

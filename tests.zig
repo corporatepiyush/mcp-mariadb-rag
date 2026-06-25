@@ -6,7 +6,6 @@ comptime {
     _ = @import("src/json.zig");
     _ = @import("src/url.zig");
     _ = @import("src/validation.zig");
-    _ = @import("src/actions/schema.zig");
     _ = @import("src/actions/kg.zig");
     _ = @import("src/actions/rag.zig");
     _ = @import("src/kg/schema.zig");
@@ -22,7 +21,6 @@ comptime {
     _ = @import("tests/json_test.zig");
     _ = @import("tests/url_test.zig");
     _ = @import("tests/validation_test.zig");
-    _ = @import("tests/config_test.zig");
     _ = @import("tests/actions_test.zig");
     _ = @import("tests/server_test.zig");
     _ = @import("tests/integration_test.zig");

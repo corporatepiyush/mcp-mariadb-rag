@@ -1,7 +1,7 @@
-//! End-to-end RAG tests against a live MariaDB + TidesDB instance.
+//! End-to-end RAG tests against a live SQLite instance.
 //! Gated on DATABASE_URL; skipped (pass) when unset.
 //!
-//!     DATABASE_URL="mysql://user:pass@host:port/db" zig build test
+//!     DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test
 //!
 //! NOTE: each test keeps its own `std.Io.Threaded` as a stack local and never
 //! moves it after `.io()` — moving it would dangle the pointers the pool's

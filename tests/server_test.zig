@@ -5,7 +5,7 @@ const pool_mod = @import("../src/pool.zig");
 const config_mod = @import("../src/config.zig");
 
 fn createTestPool(io: std.Io, allocator: std.mem.Allocator) !pool_mod.ConnectionPool {
-    return try pool_mod.ConnectionPool.init(io, allocator, "mysql://nonexist:3306/test", .{
+    return try pool_mod.ConnectionPool.init(io, allocator, "sqlite:///tmp/test_mcp.db", .{
         .min_size = 0,
         .max_size = 1,
         .tls = .{ .enforce = false, .verify = false, .ca_path = null },
@@ -14,8 +14,7 @@ fn createTestPool(io: std.Io, allocator: std.mem.Allocator) !pool_mod.Connection
 
 fn createTestConfig(allocator: std.mem.Allocator) config_mod.Config {
     return .{
-        .database_url = allocator.dupe(u8, "mysql://test:3306/test") catch unreachable,
-        .default_engine = allocator.dupe(u8, "TidesDB") catch unreachable,
+        .database_url = allocator.dupe(u8, "sqlite:///tmp/test_mcp.db") catch unreachable,
         .server = .{
             .host = allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
@@ -166,7 +165,7 @@ test "handleRequest: initialize with no params uses latest version" {
     const resp = handle(testing.allocator, "{\"method\":\"initialize\",\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
     try testing.expect(contains(resp, "2025-11-25"));
-    try testing.expect(contains(resp, "mcp-mariadb-rag"));
+    try testing.expect(contains(resp, "mcp-kv"));
     try testing.expect(contains(resp, "\"id\":1"));
 }
 
@@ -287,8 +286,7 @@ test "handleRequest: tools/call unknown tool preserves id" {
 }
 
 // ---- tools/call with known tool — pool closed ahead of time so acquire()
-// returns PoolClosed without attempting a MariaDB connection. This avoids
-// C library stderr noise from mysql_real_connect failures. ----------------
+// returns PoolClosed. ------------------------------------------------------
 
 test "handleRequest: tools/call known tool returns pool error" {
     var threaded: std.Io.Threaded = .init(testing.allocator, .{});
@@ -296,7 +294,7 @@ test "handleRequest: tools/call known tool returns pool error" {
     const io = threaded.io();
 
     var pool = try createTestPool(io, testing.allocator);
-    pool.close(); // close before acquire — no MariaDB connection attempted
+    pool.close(); // close before acquire — no DB connection attempted
     var cfg = createTestConfig(testing.allocator);
     defer cfg.deinit(testing.allocator);
 
@@ -317,8 +315,7 @@ test "handleRequest: restricted mode blocks write tool" {
     defer pool.close();
 
     var cfg = config_mod.Config{
-        .database_url = testing.allocator.dupe(u8, "mysql://test:3306/test") catch unreachable,
-        .default_engine = testing.allocator.dupe(u8, "TidesDB") catch unreachable,
+        .database_url = testing.allocator.dupe(u8, "sqlite:///tmp/test_mcp.db") catch unreachable,
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
@@ -354,10 +351,9 @@ test "handleRequest: restricted mode allows read tool" {
     const io = threaded.io();
 
     var pool = try createTestPool(io, testing.allocator);
-    pool.close(); // close before acquire — no MariaDB connection
+    pool.close(); // close before acquire — no DB connection
     var cfg = config_mod.Config{
-        .database_url = testing.allocator.dupe(u8, "mysql://test:3306/test") catch unreachable,
-        .default_engine = testing.allocator.dupe(u8, "TidesDB") catch unreachable,
+        .database_url = testing.allocator.dupe(u8, "sqlite:///tmp/test_mcp.db") catch unreachable,
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,

@@ -39,16 +39,12 @@ pub const TlsConfig = struct {
 
 pub const Config = struct {
     database_url: []const u8,
-    /// Default storage engine for CREATE TABLE when the caller does not specify
-    /// one. Defaults to "TidesDB" (the TideSQL engine).
-    default_engine: []const u8,
     server: ServerConfig,
     pool: PoolConfig,
     tls: TlsConfig,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         allocator.free(self.database_url);
-        allocator.free(self.default_engine);
         allocator.free(self.server.host);
         allocator.free(self.server.log_level);
         if (self.server.auth_token) |t| allocator.free(t);
@@ -93,7 +89,7 @@ fn envU32(name: []const u8, default: u32) u32 {
 }
 
 pub fn load(allocator: std.mem.Allocator) !Config {
-    const database_url = getEnv(allocator, "DATABASE_URL") orelse try allocator.dupe(u8, "mysql://root:@localhost:3306/mcp");
+    const database_url = getEnv(allocator, "DATABASE_URL") orelse try allocator.dupe(u8, "sqlite:///tmp/mcp.db");
     const host = getEnv(allocator, "MCP_HOST") orelse try allocator.dupe(u8, "127.0.0.1");
     const port = envU16("MCP_PORT", 3000);
     const http_port = envU16("MCP_HTTP_PORT", 3001);
@@ -117,7 +113,6 @@ pub fn load(allocator: std.mem.Allocator) !Config {
 
     return .{
         .database_url = database_url,
-        .default_engine = try allocator.dupe(u8, "TidesDB"),
         .tls = .{
             .enforce = envBool("MCP_DB_SSL"),
             .verify = envBool("MCP_DB_SSL_VERIFY"),
@@ -145,8 +140,4 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     };
 }
 
-pub fn isLoopbackHost(host: []const u8) bool {
-    if (std.ascii.eqlIgnoreCase(host, "localhost")) return true;
-    if (std.mem.eql(u8, host, "127.0.0.1") or std.mem.eql(u8, host, "::1")) return true;
-    return false;
-}
+

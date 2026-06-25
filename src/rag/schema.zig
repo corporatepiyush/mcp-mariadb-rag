@@ -4,13 +4,12 @@
 //!   * `rag_document` — one row per ingested source document (id, uri, title,
 //!     JSON metadata, chunk count).
 //!   * `rag_chunk` — the retrievable units: a slice of a document's text plus a
-//!     384-dim embedding. Lexical search runs over `content`; semantic search
-//!     runs over `embedding` via MariaDB's native VECTOR index.
+//!     384-dim embedding stored as a f32 BLOB. Lexical search runs over
+//!     `content` (via FTS5); semantic search runs over the in-memory vector
+//!     index.
 //!
-//! Key-column widths are 63 (= 252 bytes under utf8mb4) to stay within
-//! TidesDB's 255-byte max key length — the same constraint that governs the KG
-//! tables. Embeddings are NOT NULL: a chunk without an embedding cannot
-//! participate in semantic retrieval, and every ingest path supplies one.
+//! Embeddings are NOT NULL: a chunk without an embedding cannot participate in
+//! semantic retrieval, and every ingest path supplies one.
 
 const std = @import("std");
 const validation = @import("../validation.zig");

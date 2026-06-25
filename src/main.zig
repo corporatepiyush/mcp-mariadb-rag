@@ -43,7 +43,7 @@ pub fn main() !void {
     var config = try config_mod.load(allocator);
     defer config.deinit(allocator);
 
-    std.log.info("Starting MCP MariaDB RAG Server", .{});
+    std.log.info("Starting MCP KV Server", .{});
 
     if (config.server.auth_token == null and !config.server.stdio) {
         std.log.warn("No auth token configured. Set MCP_AUTH_TOKEN for security.", .{});
@@ -53,12 +53,11 @@ pub fn main() !void {
         .min_size = config.pool.min_size,
         .max_size = config.pool.max_size,
         .tls = config.tls,
-        .default_engine = config.default_engine,
     });
     defer pool.close();
 
-    std.log.info("Connection pool initialized: min={d}, max={d}, engine={s}, tls={}", .{
-        config.pool.min_size, config.pool.max_size, config.default_engine, config.tls.enforce,
+    std.log.info("Connection pool initialized: min={d}, max={d}, tls={}", .{
+        config.pool.min_size, config.pool.max_size, config.tls.enforce,
     });
 
     initKnowledgeGraphSchema(&pool) catch |err| {

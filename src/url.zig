@@ -1,8 +1,11 @@
-//! Pure parser for `mysql://user:pass@host:port/db` connection strings.
+//! Parser for connection URIs.
 //!
-//! Extracted out of the connection layer so it can be unit-tested without a
-//! live database (and without pulling in the MariaDB C headers). All returned
-//! slices borrow from the input `url`; the caller owns the backing memory.
+//! Supports:
+//!   `sqlite:///path/to/db`      — SQLite file-path database
+//!   `mysql://user:pass@host:port/db`  — legacy MariaDB connections
+//!
+//! All returned slices borrow from the input `url`; the caller owns the
+//! backing memory.
 
 const std = @import("std");
 
@@ -14,26 +17,28 @@ pub const ConnParams = struct {
     host: ?[]const u8 = null,
     db: ?[]const u8 = null,
     port: u16 = DEFAULT_PORT,
+    /// Set for `sqlite:///path` URIs. Borrows from the input URL.
+    file_path: ?[]const u8 = null,
 };
 
 pub const ParseError = error{
-    /// The URL did not start with the `mysql://` scheme.
+    /// The URL did not start with a known scheme.
     UnsupportedScheme,
 };
 
-/// Parse a `mysql://` URL. Missing components are left `null` so the caller can
-/// apply client-library defaults. The port falls back to `DEFAULT_PORT` when
-/// absent or unparseable rather than failing the whole connection.
+/// Parse a connection URL. Returns `file_path` for `sqlite://` URIs and the
+/// standard connection parameters for `mysql://` URIs.
 pub fn parse(url: []const u8) ParseError!ConnParams {
-    const scheme = "mysql://";
-    if (!std.mem.startsWith(u8, url, scheme)) return error.UnsupportedScheme;
-    const rest = url[scheme.len..];
+    if (std.mem.startsWith(u8, url, "sqlite://")) {
+        const path = url["sqlite://".len..];
+        return .{ .file_path = if (path.len > 0) path else null };
+    }
+
+    if (!std.mem.startsWith(u8, url, "mysql://")) return error.UnsupportedScheme;
+    const rest = url["mysql://".len..];
 
     var params: ConnParams = .{};
 
-    // Split userinfo from the host portion on the first '@'. A password may
-    // itself contain '@' in theory, but connection strings overwhelmingly do
-    // not; we split on the first '@' to keep host parsing unambiguous.
     const at = std.mem.indexOfScalar(u8, rest, '@');
     const userinfo = if (at) |i| rest[0..i] else "";
     const hostpart = if (at) |i| rest[i + 1 ..] else rest;
@@ -47,7 +52,6 @@ pub fn parse(url: []const u8) ParseError!ConnParams {
         }
     }
 
-    // Separate host[:port] from the optional /database path.
     const hostport, const db = if (std.mem.indexOfScalar(u8, hostpart, '/')) |slash|
         .{ hostpart[0..slash], nonEmpty(hostpart[slash + 1 ..]) }
     else
@@ -68,16 +72,33 @@ fn nonEmpty(s: []const u8) ?[]const u8 {
     return if (s.len == 0) null else s;
 }
 
-test "full url" {
+test "sqlite absolute path" {
+    const p = try parse("sqlite:///tmp/mcp.db");
+    try std.testing.expectEqualStrings("/tmp/mcp.db", p.file_path.?);
+    try std.testing.expect(p.user == null);
+}
+
+test "sqlite relative path" {
+    const p = try parse("sqlite://./data.db");
+    try std.testing.expectEqualStrings("./data.db", p.file_path.?);
+}
+
+test "sqlite in-memory" {
+    const p = try parse("sqlite://");
+    try std.testing.expect(p.file_path == null);
+}
+
+test "full mysql url" {
     const p = try parse("mysql://alice:s3cret@db.example.com:3307/shop");
     try std.testing.expectEqualStrings("alice", p.user.?);
     try std.testing.expectEqualStrings("s3cret", p.pass.?);
     try std.testing.expectEqualStrings("db.example.com", p.host.?);
     try std.testing.expectEqualStrings("shop", p.db.?);
     try std.testing.expectEqual(@as(u16, 3307), p.port);
+    try std.testing.expect(p.file_path == null);
 }
 
-test "no password" {
+test "mysql no password" {
     const p = try parse("mysql://root@localhost/mcp");
     try std.testing.expectEqualStrings("root", p.user.?);
     try std.testing.expect(p.pass == null);
@@ -85,26 +106,26 @@ test "no password" {
     try std.testing.expectEqual(@as(u16, 3306), p.port);
 }
 
-test "empty password after colon" {
+test "mysql empty password after colon" {
     const p = try parse("mysql://root:@localhost:3306/mcp");
     try std.testing.expectEqualStrings("root", p.user.?);
     try std.testing.expect(p.pass == null);
 }
 
-test "no database" {
+test "mysql no database" {
     const p = try parse("mysql://root:pw@127.0.0.1:3306");
     try std.testing.expect(p.db == null);
     try std.testing.expectEqualStrings("127.0.0.1", p.host.?);
     try std.testing.expectEqual(@as(u16, 3306), p.port);
 }
 
-test "host only" {
+test "mysql host only" {
     const p = try parse("mysql://localhost");
     try std.testing.expect(p.user == null);
     try std.testing.expectEqualStrings("localhost", p.host.?);
 }
 
-test "bad port falls back to default" {
+test "mysql bad port falls back to default" {
     const p = try parse("mysql://root@host:notaport/db");
     try std.testing.expectEqual(@as(u16, 3306), p.port);
 }

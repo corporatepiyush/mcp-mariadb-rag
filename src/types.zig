@@ -1,17 +1,14 @@
 //! Plain data types shared between the database layer and the JSON serializer.
-//!
-//! This module deliberately imports nothing but `std` so that the pure
-//! serialization logic (and its tests) never drags in the MariaDB C headers.
 
 const std = @import("std");
 
 /// How a column's textual value should be rendered in JSON.
 ///
-/// MariaDB hands every cell to us as a byte string regardless of the declared
-/// column type, so we cannot infer "is this a number?" from the bytes without
-/// corrupting data (`"007"` is a valid zip code, not the integer 7). The
-/// connection layer therefore classifies each column up front from the wire
-/// type and the serializer honours that classification.
+/// The database layer hands every cell to us as a byte string regardless of
+/// the declared column type, so we cannot infer "is this a number?" from the
+/// bytes without corrupting data (`"007"` is a valid zip code, not the integer
+/// 7). The connection layer therefore classifies each column up front from the
+/// wire type and the serializer honours that classification.
 pub const ColumnKind = enum {
     /// Integer / decimal / float column: emit the value as a bare JSON number
     /// token when it is well-formed, preserving exact digits (no float

@@ -32,7 +32,7 @@ pub fn allTableNames() []const []const u8 {
 
 // ── Private helpers ───────────────────────────────────────────────────
 
-/// Write `name` as a backtick-quoted MariaDB identifier.
+/// Write `name` as a backtick-quoted SQL identifier.
 fn writeIdent(w: *Writer, name: []const u8) !void {
     try validation.writeQuotedIdent(w, name);
 }

@@ -58,8 +58,8 @@ pub fn quoteIdent(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
 
 /// Write `s` escaped for use inside a single-quoted SQL string literal
 /// (doubling `'` and escaping backslash). The surrounding quotes are NOT
-/// written. MariaDB runs with NO_BACKSLASH_ESCAPES off by default, so a
-/// backslash is an escape character and must itself be doubled.
+/// written. Backslash is an escape character in SQL string literals and must
+/// itself be doubled.
 pub fn writeEscapedLiteral(w: *Writer, s: []const u8) Writer.Error!void {
     for (s) |ch| {
         switch (ch) {

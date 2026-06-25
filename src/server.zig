@@ -16,7 +16,7 @@ const Writer = std.Io.Writer;
 const SUPPORTED_VERSIONS = [_][]const u8{ "2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05" };
 const LATEST_VERSION = "2025-11-25";
 
-const SERVER_INFO = "\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"mcp-mariadb-rag\",\"version\":\"0.1.1\"}";
+const SERVER_INFO = "\"capabilities\":{\"tools\":{\"listChanged\":false}},\"serverInfo\":{\"name\":\"mcp-kv\",\"version\":\"0.5.0\"}";
 
 // ---- response builders (write into a *Writer) ---------------------------
 

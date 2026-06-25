@@ -1,129 +1,89 @@
-# MCP MariaDB RAG
+# MCP KV
 
-[MariaDB](https://mariadb.com/) + [TidesDB](https://github.com/tidesdb/tidesdb) MCP server with Knowledge Graph, Vector Store, and RAG capabilities.
+SQLite + HNSW/IVF-FLAT MCP server with Knowledge Graph, Vector Store, and RAG capabilities.
 
-Built with Zig (0.16) and the MariaDB C client library (`libmariadb`).
+Built with Zig (0.16) and the SQLite C library.
 
-## Overview
+## Features
 
-This server implements the [Model Context Protocol (MCP)](https://modelcontextprotocol.io) to give LLM agents a rich set of database tools — schema inspection, query execution, full-text search, vector similarity search — with **TidesDB** as the default storage engine for high-throughput LSM-tree performance.
+- **Knowledge Graph**: entity/relation/observation CRUD, BFS pathfinding, full-text search via FTS5
+- **Vector Search**: HNSW (Hierarchical Navigable Small World) and IVF-FLAT indexes implemented natively in Zig
+- **RAG Pipeline**: document ingestion, chunking, hybrid retrieval (BM25 + vector), MMR diversity re-ranking
+- **Transport**: stdio (MCP default) and HTTP/1.1 (RFC 9112) with keep-alive
 
-### Features
+## Prerequisites
 
-- **SQL Operations**: SELECT, INSERT, UPDATE, DELETE with safety constraints (WHERE required for UPDATE/DELETE)
-- **Schema Management**: list tables, describe columns, manage indexes, views, schemas, constraints, triggers
-- **Database Administration**: user management, grants, process list, locks, status/variables, table maintenance (optimize, analyze, check, flush, truncate)
-- **Full-Text Search**: FULLTEXT index-aware search in natural, boolean, and query-expansion modes
-- **Vector Search**: vector similarity search via MariaDB vector types (e.g. `VECTOR(384)`)
-- **Knowledge Graph**: schema-aware introspection for building entity-relationship graphs
-- **Access Control**: unrestricted or restricted mode; write operations can be gated
-- **Transports**: stdio (newline-delimited JSON-RPC) and HTTP (JSON-RPC with Bearer auth)
-- **Connection Pooling**: bounded, thread-safe pool with min/max size, TLS support, and automatic dead-connection eviction
-- **Metrics**: optional Prometheus-format `/metrics` endpoint
+- [Zig](https://ziglang.org/) 0.16
+- SQLite 3.53.2 (bundled via amalgamation)
 
-### Default Engine: TidesDB
-
-[TidesDB](https://github.com/tidesdb/tidesdb) is a high-performance LSM-tree storage engine for MariaDB, optimized for write-heavy and time-series workloads. The MCP server defaults to `TidesDB` for `CREATE TABLE` statements (override via `MCP_DEFAULT_ENGINE`).
-
-## Requirements
-
-- [Zig](https://ziglang.org/) 0.16.x
-- [MariaDB](https://mariadb.org/) 11.4+ (LTS) with C client library (`libmariadb`)
-- [TidesDB / TideSQL](https://github.com/tidesdb/tidesql) plugin installed in MariaDB
-
-### macOS (Homebrew)
-
-```sh
-brew install zig mariadb
-# Install TideSQL plugin (see https://github.com/tidesdb/tidesql)
+```bash
+brew install zig
 ```
-
-The build assumes MariaDB is at `/opt/homebrew/opt/mariadb`. Adjust `mariadb_include` and `mariadb_lib` in `build.zig` for other platforms.
 
 ## Build
 
-```sh
+```bash
 zig build
 ```
 
-The binary is written to `zig-out/bin/mcp-mariadb-rag`.
+The binary is written to `zig-out/bin/mcp-kv`.
 
-### Tests
+## Run
 
-```sh
-DATABASE_URL="mysql://user:pass@host:3306/db" zig build test
+```bash
+# stdio mode (default for MCP)
+MCP_AUTH_TOKEN="secret" zig-out/bin/mcp-kv
+
+# HTTP mode
+MCP_AUTH_TOKEN="secret" zig-out/bin/mcp-kv --http
 ```
 
-Requires a running MariaDB instance. Tests that depend on the database gate themselves on `$DATABASE_URL`.
+## Test
+
+```bash
+DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test
+```
 
 ## Configuration
 
-The server is configured entirely through environment variables.
-
 | Variable | Default | Description |
-|---|---|---|
-| `DATABASE_URL` | `mysql://root:@localhost:3306/mcp` | MariaDB connection string |
-| `MCP_DEFAULT_ENGINE` | `TidesDB` | Default storage engine for CREATE TABLE |
-| `MCP_HOST` | `127.0.0.1` | HTTP listen address |
-| `MCP_HTTP_PORT` | `3001` | HTTP JSON-RPC port |
-| `MCP_PORT` | `3000` | Reserved |
-| `MCP_STDIO` | `false` | Run in stdio mode (for Claude Desktop, etc.) |
-| `MCP_AUTH_TOKEN` | — | Bearer token for HTTP auth |
-| `MCP_ACCESS_MODE` | `unrestricted` | `restricted` blocks write tools |
+|----------|---------|-------------|
+| `DATABASE_URL` | `sqlite:///tmp/mcp.db` | SQLite database path |
+| `MCP_AUTH_TOKEN` | — | Auth token for MCP requests |
+| `MCP_HTTP_PORT` | `3001` | HTTP server port |
 | `MCP_LOG_LEVEL` | `info` | Log level |
-| `MCP_ENABLE_METRICS` | `false` | Enable Prometheus metrics endpoint |
-| `MCP_METRICS_PORT` | `9090` | Metrics endpoint port |
-| `MCP_MIN_CONNECTIONS` | `min(5, num_cpus)` | Minimum pool connections |
-| `MCP_MAX_CONNECTIONS` | `num_cpus * 8` | Maximum pool connections |
-| `MCP_DB_SSL` | `false` | Enforce TLS for database connection |
-| `MCP_DB_SSL_VERIFY` | `false` | Verify server certificate |
-| `MCP_DB_SSL_CA` | — | Path to CA certificate file |
+| `MCP_MIN_CONNECTIONS` | `5` | Min pool size |
+| `MCP_MAX_CONNECTIONS` | `8*CPU` | Max pool size |
+| `MCP_STDIO` | `false` | Force stdio transport |
 
-## Usage
-
-### Claude Desktop (stdio)
+## MCP Client Configuration
 
 ```json
 {
   "mcpServers": {
-    "mariadb-rag": {
-      "command": "/path/to/zig-out/bin/mcp-mariadb-rag",
+    "mcp-kv": {
+      "command": "/path/to/zig-out/bin/mcp-kv",
       "env": {
-        "DATABASE_URL": "mysql://user:pass@localhost:3306/mydb",
-        "MCP_STDIO": "true",
-        "MCP_AUTH_TOKEN": "your-token"
+        "DATABASE_URL": "sqlite:///tmp/mcp.db",
+        "MCP_AUTH_TOKEN": "secret"
       }
     }
   }
 }
 ```
 
-### HTTP mode
+## Project Status
 
-```sh
-DATABASE_URL="mysql://root:@localhost:3306/mcp" MCP_AUTH_TOKEN="secret" zig-out/bin/mcp-mariadb-rag
-```
+Active migration from MariaDB + TidesDB to SQLite + native vector indexes.
 
-Then send JSON-RPC requests:
-
-```sh
-curl -s http://localhost:3001 \
-  -H "Authorization: Bearer secret" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc":"2.0","method":"tools/list","id":1}'
-```
-
-## Tools
-
-The server exposes ~50 MCP tools covering:
-
-- **Querying**: `execute_query`, `execute_insert`, `execute_update`, `execute_delete`, `explain_query`
-- **Schema**: `list_tables`, `describe_table`, `list_indexes`, `list_schemas`, `show_constraints`, `list_triggers`
-- **DDL**: `create_table`, `drop_table`, `create_view`, `drop_view`, `create_schema`, `drop_schema`, `create_index`, `drop_index`, `add_column`, `drop_column`, `rename_column`, `alter_column_type`, `rename_table`
-- **Administration**: `show_table_status`, `show_processlist`, `show_variables`, `show_status`, `show_databases`, `show_engines`, `list_users`, `show_grants`, `optimize_table`, `analyze_table`, `check_table`, `flush_tables`, `truncate_table`, `show_locks`, `show_transaction_isolation`
-- **Search**: `fulltext_search`, `list_fulltext_indexes`, `vector_search`
-- **Access**: `create_user`, `drop_user`, `grant_privileges`, `revoke_privileges`
-
-## License
-
-MIT
+**Remaining work:**
+- Phase 1a: SQLite C bindings — `src/sqlite.zig`
+- Phase 1b: SQLite connection pool — `src/pool.zig` rewrite
+- Phase 1c: Schema DDL translation to SQLite dialect
+- Phase 1d: Native HNSW/IVF-FLAT vector index
+- Phase 1e: FTS5 + hybrid retrieval
+- Phase 2a–2d: HNSW, IVF-FLAT, SIMD distances
+- Phase 3a–3b: MMR re-ranking + streaming chunking
+- Phase 4: RFC 9112 HTTP/1.1 transport
+- Phase 5: Ancillary files (URL parser, validation, config)
+- Phase 6: Benchmarks
