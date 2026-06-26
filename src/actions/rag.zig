@@ -11,7 +11,6 @@
 //! from known counts.
 
 const std = @import("std");
-const types = @import("../types.zig");
 const pool = @import("../pool.zig");
 const json = @import("../json.zig");
 const mod = @import("mod.zig");
@@ -19,6 +18,7 @@ const schema = @import("../rag/schema.zig");
 const query = @import("../rag/query.zig");
 const chunk = @import("../rag/chunk.zig");
 const fusion = @import("../rag/fusion.zig");
+const retrieve = @import("../rag/retrieve.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -288,43 +288,31 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
     var lex_ids: std.ArrayList([]const u8) = .empty;
     defer lex_ids.deinit(allocator);
 
-    // Semantic candidates.
+    // Semantic candidates: a full streaming scan that keeps the true top-`vec_k`
+    // by vector distance (correct recall regardless of corpus size), already
+    // ordered nearest-first by the heap selector.
     if (vector_val) |vv| {
         const qvec = embeddingExact(allocator, .{ .array = vv }) catch |err| return switch (err) {
             error.BadDim => mod.errPayload("Query 'vector' must have exactly 384 dimensions"),
             error.NotNumber => mod.errPayload("Query 'vector' must contain only numbers"),
             else => mod.errPayload("Allocation error"),
         };
-        const sql = mod.renderToOwned(allocator, query.writeVectorTopK, .{ qvec, vec_k, metric }) catch
+        const sql = mod.renderToOwned(allocator, query.writeVectorScanAll, .{}) catch
             return mod.errPayload("Allocation error");
         defer allocator.free(sql);
-        const res = conn.query(allocator, sql) catch return mod.errPayload("Vector query failed");
-        collect(allocator, res, &cmap, &vec_ids) catch return mod.errPayload("Allocation error");
-        // Re-rank semantic candidates by actual vector distance via precomputed
-        // distances + index sort (avoids recomputing SIMD distance on every
-        // sort comparison — per Agent.md §297: hoist invariants out of loops).
-        if (vec_ids.items.len > 1) {
-            const n = vec_ids.items.len;
-            const dists = allocator.alloc(f32, n) catch return mod.errPayload("Allocation error");
-            defer allocator.free(dists);
-            for (vec_ids.items, 0..) |id, i| {
-                const c = cmap.get(id) orelse {
-                    dists[i] = std.math.inf(f32);
-                    continue;
-                };
-                dists[i] = switch (metric) {
-                    .cosine => 1.0 - fusion.cosineSimilarity(c.emb, qvec),
-                    .euclidean => fusion.euclideanDistance(c.emb, qvec),
-                };
-            }
-            var indices = allocator.alloc(usize, n) catch return mod.errPayload("Allocation error");
-            defer allocator.free(indices);
-            for (0..n) |i| indices[i] = i;
-            std.sort.block(usize, indices, dists, struct {
-                fn less(d: []const f32, a: usize, b: usize) bool { return d[a] < d[b]; }
-            }.less);
-            const orig = allocator.dupe([]const u8, vec_ids.items) catch return mod.errPayload("Allocation error");
-            for (indices, 0..) |idx, i| vec_ids.items[i] = orig[idx];
+        const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qvec, metric, vec_k) catch
+            return mod.errPayload("Vector query failed");
+        cmap.ensureUnusedCapacity(allocator, @intCast(matches.len)) catch return mod.errPayload("Allocation error");
+        vec_ids.ensureUnusedCapacity(allocator, matches.len) catch return mod.errPayload("Allocation error");
+        for (matches) |m| {
+            vec_ids.appendAssumeCapacity(m.id);
+            if (!cmap.contains(m.id)) cmap.putAssumeCapacity(m.id, .{
+                .id = m.id,
+                .document_id = m.document_id,
+                .ordinal = m.ordinal,
+                .content = m.content,
+                .emb = m.emb,
+            });
         }
     }
 
@@ -386,8 +374,10 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
 }
 
-/// Pure semantic search over chunks (no lexical/fusion), returning rows sorted
-/// by vector distance to the query embedding (nearest-first).
+/// Pure semantic search over chunks (no lexical/fusion). Streams the whole chunk
+/// set through the bounded top-k heap and returns the `k` nearest by vector
+/// distance, nearest-first. Output is a `{"results":[…],"count":n}` envelope
+/// with each chunk's distance under the metric used.
 pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
     const vector_val = mod.getArrayParam(args, "vector") orelse return mod.errPayload("Missing 'vector' parameter");
     const k = getUintParam(args, "k", 10);
@@ -398,61 +388,29 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         error.NotNumber => mod.errPayload("'vector' must contain only numbers"),
         else => mod.errPayload("Allocation error"),
     };
-    const sql = mod.renderToOwned(allocator, query.writeVectorTopK, .{ qvec, k, metric }) catch
+    const sql = mod.renderToOwned(allocator, query.writeVectorScanAll, .{}) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(sql);
-    const res = conn.query(allocator, sql) catch return mod.errPayload("Query failed");
-    return reorderByDist(allocator, res, qvec, metric);
-}
+    const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qvec, metric, k) catch
+        return mod.errPayload("Query failed");
 
-fn reorderByDist(allocator: Allocator, result: pool.QueryResult, qvec: []const f32, metric: query.Metric) Payload {
-    const rows = result.rows orelse return mod.resultPayload(allocator, result);
-    if (rows.len < 2) return mod.resultPayload(allocator, result);
-
-    const n = rows.len;
-    const distances = allocator.alloc(f32, n) catch return mod.errPayload("Allocation error");
-    defer allocator.free(distances);
-
-    const valid = allocator.alloc(bool, n) catch return mod.errPayload("Allocation error");
-    defer allocator.free(valid);
-
-    for (rows, 0..) |row, i| {
-        const emb = embFromBlob(allocator, row.values[4] orelse "") catch {
-            valid[i] = false;
-            continue;
-        };
-        valid[i] = emb.len > 0;
-        distances[i] = if (valid[i]) switch (metric) {
-            .cosine => 1.0 - fusion.cosineSimilarity(emb, qvec),
-            .euclidean => fusion.euclideanDistance(emb, qvec),
-        } else std.math.inf(f32);
+    var aw = Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{\"results\":[") catch return mod.errPayload("Serialization error");
+    for (matches, 0..) |m, i| {
+        if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
+        w.writeAll("{\"id\":") catch return mod.errPayload("Serialization error");
+        jsonStr(w, m.id) catch return mod.errPayload("Serialization error");
+        w.writeAll(",\"documentId\":") catch return mod.errPayload("Serialization error");
+        jsonStr(w, m.document_id) catch return mod.errPayload("Serialization error");
+        w.print(",\"ordinal\":{s},\"distance\":{d:.6},\"content\":", .{ m.ordinal, m.dist }) catch
+            return mod.errPayload("Serialization error");
+        jsonStr(w, m.content) catch return mod.errPayload("Serialization error");
+        w.writeByte('}') catch return mod.errPayload("Serialization error");
     }
-
-    const indices = allocator.alloc(usize, n) catch return mod.errPayload("Allocation error");
-    defer allocator.free(indices);
-    for (0..n) |i| indices[i] = i;
-
-    const DistCtx = struct { d: []const f32, v: []const bool };
-    std.sort.block(usize, indices, DistCtx{ .d = distances, .v = valid }, struct {
-        fn less(ctx: DistCtx, a: usize, b: usize) bool {
-            if (ctx.v[a] != ctx.v[b]) return ctx.v[a];
-            return ctx.d[a] < ctx.d[b];
-        }
-    }.less);
-
-    const sorted_rows = allocator.alloc(types.Row, n) catch return mod.errPayload("Allocation error");
-    for (indices, 0..) |idx, i| sorted_rows[i] = rows[idx];
-
-    const sorted = types.QueryResult{
-        .rows = sorted_rows,
-        .column_names = result.column_names,
-        .column_kinds = result.column_kinds,
-        .num_fields = result.num_fields,
-        .num_rows = result.num_rows,
-        .affected_rows = result.affected_rows,
-        .insert_id = result.insert_id,
-    };
-    return mod.resultPayload(allocator, sorted);
+    w.print("],\"count\":{d}}}", .{matches.len}) catch return mod.errPayload("Serialization error");
+    return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
 }
 
 // ── Document CRUD + stats ─────────────────────────────────────────────

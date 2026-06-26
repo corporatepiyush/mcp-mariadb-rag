@@ -155,14 +155,33 @@ pub fn writeChunksByDocument(w: *Writer, document_id: []const u8) !void {
 
 // ── Retrieval ─────────────────────────────────────────────────────────
 
-/// Semantic top-k by vector distance. Distance computation moves to
-/// application code (fusion.zig SIMD kernels) — the query just returns all
-/// candidates so the caller can re-rank (MMR) without a second round-trip.
-/// `SELECT id, document_id, ordinal, content, embedding FROM rag_chunk LIMIT k`
-pub fn writeVectorTopK(w: *Writer, _: []const f32, k: u64, _: Metric) !void {
-    try w.writeAll("SELECT id, document_id, ordinal, content, embedding FROM ");
+/// Full semantic scan: only `id` + `embedding`, no `LIMIT`. Top-k selection
+/// happens application-side via the streaming `flat.TopK` heap
+/// (`retrieve.vectorScanTopK`), which keeps O(k) memory while scanning O(N)
+/// rows. Selecting *just* the two columns the distance kernel needs keeps the
+/// scan off the (potentially large) `content`/metadata bytes — those are
+/// hydrated for the k survivors via `writeChunksByIds`. This replaces the old
+/// `SELECT … LIMIT k`, which returned an arbitrary k rows and so had broken
+/// recall for any corpus larger than k (PLAN.md §3).
+/// `SELECT id, embedding FROM rag_chunk`
+pub fn writeVectorScanAll(w: *Writer) !void {
+    try w.writeAll("SELECT id, embedding FROM ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
-    try w.print(" LIMIT {d}", .{k});
+}
+
+/// Fetch the row payload for an explicit set of chunk ids — the hydration step
+/// that fills `content`/`document_id`/`ordinal` for the top-k survivors of the
+/// vector scan. Caller must guarantee `ids.len > 0`.
+/// `SELECT id, document_id, ordinal, content FROM rag_chunk WHERE id IN ('a','b')`
+pub fn writeChunksByIds(w: *Writer, ids: []const []const u8) !void {
+    try w.writeAll("SELECT id, document_id, ordinal, content FROM ");
+    try validation.writeQuotedIdent(w, schema.chunk_table);
+    try w.writeAll(" WHERE id IN (");
+    for (ids, 0..) |id, i| {
+        if (i > 0) try w.writeByte(',');
+        try writeSqlLiteral(w, id);
+    }
+    try w.writeByte(')');
 }
 
 /// Lexical top-k by substring match. Ordered by content length ascending as a
@@ -244,14 +263,24 @@ test "writeUpsertChunks batches rows" {
     try testing.expect(std.mem.indexOf(u8, out, ", ('d1#1','d1',1,'world',1,") != null);
 }
 
-test "writeVectorTopK selects embedding and limits" {
+test "writeVectorScanAll scans only id + embedding, no LIMIT (full recall scan)" {
     var buf: [2048]u8 = undefined;
-    const v = [_]f32{ 1, 2, 3 };
-    const e = try renderSql(&buf, writeVectorTopK, .{ &v, @as(u64, 5), Metric.euclidean });
+    const e = try renderSql(&buf, writeVectorScanAll, .{});
     try testing.expect(std.mem.indexOf(u8, e, "VEC_DISTANCE_EUCLIDEAN") == null);
-    try testing.expect(std.mem.indexOf(u8, e, "VEC_ToText") == null);
-    try testing.expect(std.mem.indexOf(u8, e, "SELECT id, document_id, ordinal, content, embedding FROM") != null);
-    try testing.expect(std.mem.indexOf(u8, e, "LIMIT 5") != null);
+    try testing.expectEqualStrings("SELECT id, embedding FROM `rag_chunk`", e);
+    // No content/metadata in the hot scan, and no LIMIT — the heap bounds it.
+    try testing.expect(std.mem.indexOf(u8, e, "content") == null);
+    try testing.expect(std.mem.indexOf(u8, e, "LIMIT") == null);
+}
+
+test "writeChunksByIds builds an escaped IN list" {
+    var buf: [1024]u8 = undefined;
+    const ids = [_][]const u8{ "d1#0", "d1#1", "O'Brien" };
+    const out = try renderSql(&buf, writeChunksByIds, .{@as([]const []const u8, &ids)});
+    try testing.expectEqualStrings(
+        "SELECT id, document_id, ordinal, content FROM `rag_chunk` WHERE id IN ('d1#0','d1#1','O''Brien')",
+        out,
+    );
 }
 
 test "writeLexicalTopK builds escaped LIKE, uses LENGTH" {
