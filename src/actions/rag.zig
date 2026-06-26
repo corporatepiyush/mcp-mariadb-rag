@@ -27,6 +27,9 @@ const PooledConn = pool.PooledConnection;
 const Payload = mod.Payload;
 const Writer = std.Io.Writer;
 
+// Compile-time default; the *active* dimensionality is `schema.embeddingDims()`,
+// resolved at startup from MCP_EMBED_DIMS. Used only where a comptime value is
+// needed (e.g. the dimension-enforcement unit test).
 const dims = schema.embedding_dims;
 
 // ── Param helpers ─────────────────────────────────────────────────────
@@ -58,13 +61,15 @@ fn getFloatParam(args: ?Value, name: []const u8, default: f32) f32 {
 
 const EmbedError = error{ BadDim, NotNumber, OutOfMemory };
 
-/// Parse a JSON array into an owned `[dims]`-length embedding. The 384-dim BLOB
-/// column requires an exact match, so a wrong length is a hard error.
+/// Parse a JSON array into an owned embedding of exactly `schema.embeddingDims()`
+/// components. Every vector in a corpus must share that width, so a wrong length
+/// is a hard error.
 fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
     if (val != .array) return error.NotNumber;
     const arr = val.array;
-    if (arr.items.len != dims) return error.BadDim;
-    const out = try allocator.alloc(f32, dims);
+    const want = schema.embeddingDims();
+    if (arr.items.len != want) return error.BadDim;
+    const out = try allocator.alloc(f32, want);
     for (arr.items, 0..) |item, i| {
         out[i] = switch (item) {
             .float => |f| @floatCast(f),
@@ -73,6 +78,17 @@ fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
         };
     }
     return out;
+}
+
+/// "<what> must have exactly <N> dimensions" — N is the runtime MCP_EMBED_DIMS,
+/// so the message tells the operator the actual configured width.
+fn dimErr(allocator: Allocator, what: []const u8) Payload {
+    const msg = std.fmt.allocPrint(
+        allocator,
+        "{s} must have exactly {d} dimensions (MCP_EMBED_DIMS)",
+        .{ what, schema.embeddingDims() },
+    ) catch return mod.errPayload("Embedding has the wrong dimensionality");
+    return .{ .text = msg, .is_error = true };
 }
 
 /// Interpret raw f32 blob bytes as a float slice.
@@ -198,10 +214,10 @@ fn parseChunkRows(allocator: Allocator, document_id: []const u8, items: []const 
     return rows;
 }
 
-fn errFromChunkParse(err: anyerror) Payload {
+fn errFromChunkParse(allocator: Allocator, err: anyerror) Payload {
     return switch (err) {
         error.BadChunk => mod.errPayload("Each chunk needs a string 'content' and 'embedding' array"),
-        error.BadDim => mod.errPayload("Each embedding must have exactly 384 dimensions"),
+        error.BadDim => dimErr(allocator, "Each embedding"),
         error.NotNumber => mod.errPayload("Embedding must contain only numbers"),
         else => mod.errPayload("Allocation error"),
     };
@@ -218,7 +234,7 @@ pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     const title = mod.getStringParam(args, "title") orelse "";
     const metadata = mod.getStringParam(args, "metadata") orelse "{}";
 
-    const rows = parseChunkRows(allocator, id, chunks_val.items) catch |err| return errFromChunkParse(err);
+    const rows = parseChunkRows(allocator, id, chunks_val.items) catch |err| return errFromChunkParse(allocator, err);
 
     const doc_sql = mod.renderToOwned(allocator, query.writeUpsertDocument, .{ id, uri, title, metadata, rows.len }) catch
         return mod.errPayload("Allocation error");
@@ -245,7 +261,7 @@ pub fn upsertChunks(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     const chunks_val = mod.getArrayParam(args, "chunks") orelse return mod.errPayload("Missing 'chunks' parameter");
     if (chunks_val.items.len == 0) return mod.errPayload("Empty chunks list");
 
-    const rows = parseChunkRows(allocator, document_id, chunks_val.items) catch |err| return errFromChunkParse(err);
+    const rows = parseChunkRows(allocator, document_id, chunks_val.items) catch |err| return errFromChunkParse(allocator, err);
 
     const sql = mod.renderToOwned(allocator, query.writeUpsertChunks, .{rows}) catch
         return mod.errPayload("Allocation error");
@@ -335,7 +351,7 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
     // ordered nearest-first by the heap selector.
     if (vector_val) |vv| {
         const qvec = embeddingExact(allocator, .{ .array = vv }) catch |err| return switch (err) {
-            error.BadDim => mod.errPayload("Query 'vector' must have exactly 384 dimensions"),
+            error.BadDim => dimErr(allocator, "Query 'vector'"),
             error.NotNumber => mod.errPayload("Query 'vector' must contain only numbers"),
             else => mod.errPayload("Allocation error"),
         };
@@ -426,7 +442,7 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
     const metric = query.Metric.parse(mod.getStringParam(args, "metric"));
 
     const qvec = embeddingExact(allocator, .{ .array = vector_val }) catch |err| return switch (err) {
-        error.BadDim => mod.errPayload("'vector' must have exactly 384 dimensions"),
+        error.BadDim => dimErr(allocator, "'vector'"),
         error.NotNumber => mod.errPayload("'vector' must contain only numbers"),
         else => mod.errPayload("Allocation error"),
     };
@@ -570,6 +586,27 @@ test "embeddingExact enforces dimensionality" {
 
     const ok = try embeddingExact(a, parseValue(a, zerosArray(a, dims, false)));
     try testing.expectEqual(@as(usize, dims), ok.len);
+}
+
+test "embeddingExact honours the runtime MCP_EMBED_DIMS width" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Switch the active width to 1024 (e.g. a Voyage embedder), then restore so
+    // the global doesn't leak into other tests.
+    const saved = schema.embeddingDims();
+    defer schema.setEmbeddingDims(saved);
+    schema.setEmbeddingDims(1024);
+
+    // The old 384-wide vector is now rejected; a 1024-wide one is accepted.
+    try testing.expectError(error.BadDim, embeddingExact(a, parseValue(a, zerosArray(a, 384, false))));
+    const ok = try embeddingExact(a, parseValue(a, zerosArray(a, 1024, false)));
+    try testing.expectEqual(@as(usize, 1024), ok.len);
+
+    // setEmbeddingDims(0) is ignored — validation can't be disabled by a typo.
+    schema.setEmbeddingDims(0);
+    try testing.expectEqual(@as(usize, 1024), schema.embeddingDims());
 }
 
 test "getUintParam accepts number and string forms" {

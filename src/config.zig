@@ -188,6 +188,9 @@ pub const Config = struct {
     host: HostInfo = .{ .ram_bytes = 1 << 30, .cores = 1 },
     tier: Tier = .mobile,
     mem_budget_mb: u64 = 0,
+    /// Active embedding dimensionality (MCP_EMBED_DIMS, default 384). Lets one
+    /// binary serve a corpus built with a higher-dimensional embedder.
+    embed_dims: u32 = 384,
     sqlite: SqliteTuning = SqliteTuning.safe_default,
     /// Print the resolved-config table and exit without serving (capacity
     /// preflight). Also settable via the `--print-config` CLI flag.
@@ -211,7 +214,7 @@ pub const Config = struct {
             self.host.cores,
             self.mem_budget_mb,
         });
-        log.info("pool: min={d} max={d}", .{ self.pool.min_size, self.pool.max_size });
+        log.info("pool: min={d} max={d}; embed_dims={d}", .{ self.pool.min_size, self.pool.max_size, self.embed_dims });
         log.info("sqlite: cache={d}MB mmap={d}MB page_size={d} synchronous={s} temp_store={s} wal_ckpt={d} busy_ms={d}", .{
             self.sqlite.cache_kib / 1024,
             self.sqlite.mmap_bytes / (1024 * 1024),
@@ -348,11 +351,13 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const queue_timeout = envU32("MCP_QUEUE_TIMEOUT", 10);
     const create_timeout = envU32("MCP_CREATE_TIMEOUT", 5);
     const dry_run = envBool("MCP_DRY_RUN");
+    const embed_dims = envU32("MCP_EMBED_DIMS", 384);
 
     return .{
         .host = host_info,
         .tier = tier,
         .mem_budget_mb = mem_budget_mb,
+        .embed_dims = embed_dims,
         .sqlite = resolveSqlite(tier),
         .dry_run = dry_run,
         .database_url = database_url,

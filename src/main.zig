@@ -48,6 +48,9 @@ pub fn main() !void {
 
     // Capacity-planning preflight: `MCP_DRY_RUN=1` resolves the full knob table
     // and exits without serving.
+    // Resolve the active embedding dimensionality once, before serving.
+    schema_rag.setEmbeddingDims(config.embed_dims);
+
     config.logResolved();
     if (config.dry_run) {
         std.log.info("dry run: exiting without serving (MCP_DRY_RUN)", .{});
