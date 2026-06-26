@@ -4,6 +4,7 @@ const transport = @import("transport.zig");
 const pool_mod = @import("pool.zig");
 const schema_kg = @import("kg/schema.zig");
 const schema_rag = @import("rag/schema.zig");
+const index_store = @import("index/store.zig");
 
 fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
     var conn = try pool.acquire();
@@ -76,6 +77,17 @@ pub fn main() !void {
     initKnowledgeGraphSchema(&pool) catch |err| {
         std.log.warn("KG schema init failed (will be retried on first use): {s}", .{@errorName(err)});
     };
+
+    // Publish the ANN index cache (no-op for queries when MCP_INDEX_TYPE=flat).
+    var idx_store = index_store.Store.init(allocator, io, .{
+        .enabled = config.index_type == .hnsw,
+        .metric = if (config.index_cosine) .cosine else .l2,
+        .m = config.hnsw_m,
+        .ef_construction = config.hnsw_ef_construction,
+        .ef_search = config.hnsw_ef_search,
+    });
+    defer idx_store.deinit();
+    index_store.setGlobal(&idx_store);
 
     if (config.server.stdio) {
         std.log.info("Running in stdio mode", .{});

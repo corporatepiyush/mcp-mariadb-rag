@@ -19,6 +19,7 @@ const query = @import("../rag/query.zig");
 const chunk = @import("../rag/chunk.zig");
 const fusion = @import("../rag/fusion.zig");
 const retrieve = @import("../rag/retrieve.zig");
+const index_store = @import("../index/store.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -107,6 +108,12 @@ fn parseDocFilter(allocator: Allocator, args: ?Value) ?[]const []const u8 {
         }
     }
     return null;
+}
+
+/// Invalidate the ANN index cache after a committed write so the next search
+/// rebuilds against the new corpus. No-op when the index is disabled/unset.
+fn invalidateIndex() void {
+    if (index_store.global()) |st| st.bumpEpoch();
 }
 
 /// "<what> must have exactly <N> dimensions" — N is the runtime MCP_EMBED_DIMS,
@@ -274,6 +281,7 @@ pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
         return mod.errPayload("Allocation error");
     defer allocator.free(chunk_sql);
     _ = conn.execute(chunk_sql) catch return mod.errPayload("Chunk upsert failed");
+    invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
@@ -296,6 +304,7 @@ pub fn upsertChunks(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         return mod.errPayload("Allocation error");
     defer allocator.free(sql);
     _ = conn.execute(sql) catch return mod.errPayload("Chunk upsert failed");
+    invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
@@ -482,6 +491,22 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         else => mod.errPayload("Allocation error"),
     };
     const doc_filter = parseDocFilter(allocator, args);
+
+    // HNSW fast path: O(log N) instead of the O(N) scan, when the index is
+    // enabled, the request has no document filter (the graph isn't scoped), and
+    // the request metric matches the index's build metric. Any miss falls
+    // through to the always-correct flat scan below.
+    if (doc_filter == null) {
+        if (index_store.global()) |st| {
+            const metric_matches = (st.metric() == .cosine) == (metric == .cosine);
+            if (st.enabled() and metric_matches) {
+                if (st.search(conn.conn.db, allocator, qvec, k)) |hits| {
+                    return hnswResultPayload(allocator, conn, hits);
+                }
+            }
+        }
+    }
+
     const sql = (if (doc_filter) |ids|
         mod.renderToOwned(allocator, query.writeVectorScanByDocuments, .{ids})
     else
@@ -507,6 +532,34 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         w.writeByte('}') catch return mod.errPayload("Serialization error");
     }
     w.print("],\"count\":{d}}}", .{matches.len}) catch return mod.errPayload("Serialization error");
+    return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
+}
+
+/// Emit the `{"results":[…]}` envelope from HNSW hits, hydrating
+/// content/document/ordinal in one round-trip. Mirrors the flat-scan shape with
+/// an `"index":"hnsw"` marker so callers can observe which path served them.
+fn hnswResultPayload(allocator: Allocator, conn: *PooledConn, hits: []const index_store.Hit) Payload {
+    const ids = allocator.alloc([]const u8, hits.len) catch return mod.errPayload("Allocation error");
+    for (hits, 0..) |h, i| ids[i] = h.id;
+    var rows = retrieve.fetchByIds(conn.conn.db, allocator, ids) catch return mod.errPayload("Query failed");
+
+    var aw = Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{\"results\":[") catch return mod.errPayload("Serialization error");
+    for (hits, 0..) |h, i| {
+        const r = rows.get(h.id) orelse retrieve.RowData{ .document_id = "", .ordinal = "0", .content = "" };
+        if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
+        w.writeAll("{\"id\":") catch return mod.errPayload("Serialization error");
+        jsonStr(w, h.id) catch return mod.errPayload("Serialization error");
+        w.writeAll(",\"documentId\":") catch return mod.errPayload("Serialization error");
+        jsonStr(w, r.document_id) catch return mod.errPayload("Serialization error");
+        w.print(",\"ordinal\":{s},\"distance\":{d:.6},\"content\":", .{ r.ordinal, h.dist }) catch
+            return mod.errPayload("Serialization error");
+        jsonStr(w, r.content) catch return mod.errPayload("Serialization error");
+        w.writeByte('}') catch return mod.errPayload("Serialization error");
+    }
+    w.print("],\"count\":{d},\"index\":\"hnsw\"}}", .{hits.len}) catch return mod.errPayload("Serialization error");
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
 }
 
@@ -544,6 +597,7 @@ pub fn deleteDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
         return mod.errPayload("Allocation error");
     defer allocator.free(doc_sql);
     const docs_deleted = conn.execute(doc_sql) catch return mod.errPayload("Document delete failed");
+    invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();

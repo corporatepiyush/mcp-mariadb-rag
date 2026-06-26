@@ -118,21 +118,21 @@ pub fn vectorScanTopK(
     return out;
 }
 
-/// Fill `content`/`document_id`/`ordinal` on `matches` (nearest-first order
-/// preserved) via a single `WHERE id IN (…)` query. Ids deleted between scan and
-/// fetch keep their empty defaults rather than failing the whole retrieval.
-fn hydrate(db: *sqlite.sqlite3, allocator: Allocator, matches: []Match) !void {
-    const ids = try allocator.alloc([]const u8, matches.len);
-    for (matches, 0..) |m, i| ids[i] = m.id;
+/// Row payload fetched by id during hydration.
+pub const RowData = struct { document_id: []const u8, ordinal: []const u8, content: []const u8 };
+
+/// Fetch `document_id`/`ordinal`/`content` for an explicit id set in one
+/// `WHERE id IN (…)` round-trip, keyed by id. Arena-owned. Shared by the flat
+/// scan's hydration and the HNSW path. `ids.len == 0` yields an empty map.
+pub fn fetchByIds(db: *sqlite.sqlite3, allocator: Allocator, ids: []const []const u8) !std.StringHashMapUnmanaged(RowData) {
+    var by_id: std.StringHashMapUnmanaged(RowData) = .empty;
+    if (ids.len == 0) return by_id;
+    try by_id.ensureTotalCapacity(allocator, @intCast(ids.len));
 
     var aw = std.Io.Writer.Allocating.init(allocator);
     try query.writeChunksByIds(&aw.writer, ids);
     const stmt = try sqlite.prepare(db, aw.written());
     defer sqlite.finalize(stmt);
-
-    const Row = struct { document_id: []const u8, ordinal: []const u8, content: []const u8 };
-    var by_id: std.StringHashMapUnmanaged(Row) = .empty;
-    try by_id.ensureTotalCapacity(allocator, @intCast(matches.len));
 
     while (true) {
         const rc = sqlite.sqlite3_step(stmt);
@@ -145,7 +145,16 @@ fn hydrate(db: *sqlite.sqlite3, allocator: Allocator, matches: []Match) !void {
             .content = try dupText(allocator, stmt, 3),
         });
     }
+    return by_id;
+}
 
+/// Fill `content`/`document_id`/`ordinal` on `matches` (nearest-first order
+/// preserved). Ids deleted between scan and fetch keep their empty defaults
+/// rather than failing the whole retrieval.
+fn hydrate(db: *sqlite.sqlite3, allocator: Allocator, matches: []Match) !void {
+    const ids = try allocator.alloc([]const u8, matches.len);
+    for (matches, 0..) |m, i| ids[i] = m.id;
+    var by_id = try fetchByIds(db, allocator, ids);
     for (matches) |*m| {
         if (by_id.get(m.id)) |r| {
             m.document_id = r.document_id;

@@ -39,6 +39,32 @@ pub const Tier = enum {
     }
 };
 
+/// Vector index backend. `flat` is the always-correct O(N) streaming scan;
+/// `hnsw` builds an in-memory ANN cache for O(log N) queries (PLAN.md §3).
+pub const IndexType = enum {
+    flat,
+    hnsw,
+
+    pub fn parse(s: ?[]const u8) ?IndexType {
+        const str = s orelse return null;
+        if (std.ascii.eqlIgnoreCase(str, "flat")) return .flat;
+        if (std.ascii.eqlIgnoreCase(str, "hnsw")) return .hnsw;
+        return null;
+    }
+
+    pub fn name(self: IndexType) []const u8 {
+        return @tagName(self);
+    }
+
+    /// Tiers that can afford the resident graph default to HNSW.
+    pub fn forTier(t: Tier) IndexType {
+        return switch (t) {
+            .mobile, .edge => .flat,
+            .server, .dc => .hnsw,
+        };
+    }
+};
+
 /// Detected host facts that seed every default. Cheap to gather; logged once.
 pub const HostInfo = struct {
     ram_bytes: u64,
@@ -191,6 +217,14 @@ pub const Config = struct {
     /// Active embedding dimensionality (MCP_EMBED_DIMS, default 384). Lets one
     /// binary serve a corpus built with a higher-dimensional embedder.
     embed_dims: u32 = 384,
+    // ── Vector index ──
+    index_type: IndexType = .flat,
+    /// true = cosine, false = euclidean/L2. The HNSW cache is built for one
+    /// metric; requests using the other metric fall back to the flat scan.
+    index_cosine: bool = true,
+    hnsw_m: u32 = 16,
+    hnsw_ef_construction: u32 = 200,
+    hnsw_ef_search: u32 = 64,
     sqlite: SqliteTuning = SqliteTuning.safe_default,
     /// Print the resolved-config table and exit without serving (capacity
     /// preflight). Also settable via the `--print-config` CLI flag.
@@ -215,6 +249,13 @@ pub const Config = struct {
             self.mem_budget_mb,
         });
         log.info("pool: min={d} max={d}; embed_dims={d}", .{ self.pool.min_size, self.pool.max_size, self.embed_dims });
+        log.info("index: type={s} metric={s} hnsw_m={d} ef_construction={d} ef_search={d}", .{
+            self.index_type.name(),
+            if (self.index_cosine) "cosine" else "euclidean",
+            self.hnsw_m,
+            self.hnsw_ef_construction,
+            self.hnsw_ef_search,
+        });
         log.info("sqlite: cache={d}MB mmap={d}MB page_size={d} synchronous={s} temp_store={s} wal_ckpt={d} busy_ms={d}", .{
             self.sqlite.cache_kib / 1024,
             self.sqlite.mmap_bytes / (1024 * 1024),
@@ -352,12 +393,19 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const create_timeout = envU32("MCP_CREATE_TIMEOUT", 5);
     const dry_run = envBool("MCP_DRY_RUN");
     const embed_dims = envU32("MCP_EMBED_DIMS", 384);
+    const index_type = IndexType.parse(envBorrow("MCP_INDEX_TYPE")) orelse IndexType.forTier(tier);
+    const index_cosine = !std.ascii.eqlIgnoreCase(envBorrow("MCP_INDEX_METRIC") orelse "cosine", "euclidean");
 
     return .{
         .host = host_info,
         .tier = tier,
         .mem_budget_mb = mem_budget_mb,
         .embed_dims = embed_dims,
+        .index_type = index_type,
+        .index_cosine = index_cosine,
+        .hnsw_m = envU32("MCP_HNSW_M", 16),
+        .hnsw_ef_construction = envU32("MCP_HNSW_EF_CONSTRUCTION", 200),
+        .hnsw_ef_search = envU32("MCP_HNSW_EF_SEARCH", 64),
         .sqlite = resolveSqlite(tier),
         .dry_run = dry_run,
         .database_url = database_url,
