@@ -275,12 +275,25 @@ pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     const doc_sql = mod.renderToOwned(allocator, query.writeUpsertDocument, .{ id, uri, title, metadata, rows.len }) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(doc_sql);
-    _ = conn.execute(doc_sql) catch return mod.errPayload("Document upsert failed");
-
     const chunk_sql = mod.renderToOwned(allocator, query.writeUpsertChunks, .{rows}) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(chunk_sql);
-    _ = conn.execute(chunk_sql) catch return mod.errPayload("Chunk upsert failed");
+
+    // Atomic: document row and its chunks commit together (or not at all), in one
+    // transaction (one fsync instead of two).
+    conn.begin() catch return mod.errPayload("Failed to begin transaction");
+    _ = conn.execute(doc_sql) catch {
+        conn.rollback();
+        return mod.errPayload("Document upsert failed");
+    };
+    _ = conn.execute(chunk_sql) catch {
+        conn.rollback();
+        return mod.errPayload("Chunk upsert failed");
+    };
+    conn.commit() catch {
+        conn.rollback();
+        return mod.errPayload("Failed to commit transaction");
+    };
     invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);
@@ -591,12 +604,24 @@ pub fn deleteDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     const chunk_sql = mod.renderToOwned(allocator, query.writeDeleteChunksByDocument, .{id}) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(chunk_sql);
-    const chunks_deleted = conn.execute(chunk_sql) catch return mod.errPayload("Chunk delete failed");
-
     const doc_sql = mod.renderToOwned(allocator, query.writeDeleteDocument, .{id}) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(doc_sql);
-    const docs_deleted = conn.execute(doc_sql) catch return mod.errPayload("Document delete failed");
+
+    // Atomic: chunks and the document row are removed together.
+    conn.begin() catch return mod.errPayload("Failed to begin transaction");
+    const chunks_deleted = conn.execute(chunk_sql) catch {
+        conn.rollback();
+        return mod.errPayload("Chunk delete failed");
+    };
+    const docs_deleted = conn.execute(doc_sql) catch {
+        conn.rollback();
+        return mod.errPayload("Document delete failed");
+    };
+    conn.commit() catch {
+        conn.rollback();
+        return mod.errPayload("Failed to commit transaction");
+    };
     invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);

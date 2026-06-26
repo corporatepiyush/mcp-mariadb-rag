@@ -182,6 +182,24 @@ pub const PooledConnection = struct {
             return err;
         };
     }
+
+    /// Begin an immediate write transaction (acquires the write lock up front,
+    /// so the multi-statement body can't interleave with another writer).
+    pub fn begin(self: *PooledConnection) !void {
+        _ = try self.execute("BEGIN IMMEDIATE");
+    }
+
+    pub fn commit(self: *PooledConnection) !void {
+        _ = try self.execute("COMMIT");
+    }
+
+    /// Best-effort rollback for the error path; a failure here doesn't mask the
+    /// original error, but does invalidate the connection so the pool recycles it.
+    pub fn rollback(self: *PooledConnection) void {
+        _ = self.conn.execute("ROLLBACK") catch {
+            self.valid = false;
+        };
+    }
 };
 
 const ConnList = std.ArrayList(DatabaseConn);
@@ -448,6 +466,38 @@ test "DatabaseConn DDL with no result set" {
     const result = try conn.query(arena.allocator(), "CREATE TABLE t(x INTEGER)");
     try testing.expect(result.rows == null);
     try testing.expectEqual(@as(u64, 0), result.affected_rows);
+}
+
+test "PooledConnection transaction commit and rollback" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try ConnectionPool.init(io, testing.allocator, "sqlite://", .{
+        .min_size = 1,
+        .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    _ = try conn.execute("CREATE TABLE t(x INTEGER)");
+
+    // Commit persists.
+    try conn.begin();
+    _ = try conn.execute("INSERT INTO t VALUES(1)");
+    _ = try conn.execute("INSERT INTO t VALUES(2)");
+    try conn.commit();
+
+    // Rollback discards.
+    try conn.begin();
+    _ = try conn.execute("INSERT INTO t VALUES(3)");
+    conn.rollback();
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const res = try conn.query(arena.allocator(), "SELECT COUNT(*) FROM t");
+    try testing.expectEqualStrings("2", res.rows.?[0].values[0].?);
 }
 
 test "ConnectionPool acquire/release" {
