@@ -594,33 +594,36 @@ fn embFromBlob(a: Allocator, blob: []const u8) ![]f32 {
     return out;
 }
 
+/// Output column layout after re-ranking — the raw `embedding` BLOB is replaced
+/// by a computed `distance`, so the response is valid JSON (f32 bytes are not
+/// UTF-8) and actually carries the score the caller needs.
+const search_columns = [_][]const u8{ "id", "entity_name", "text_content", "distance" };
+const search_kinds = [_]sqtypes.ColumnKind{ .text, .text, .text, .numeric };
+
+/// Re-rank vector-search rows by exact distance to `qvec` and emit them without
+/// the embedding blob. Column 3 of the input is the embedding; the output keeps
+/// id/entity/text and appends the distance.
 fn reorderKgRows(a: Allocator, result: pool.QueryResult, qvec: []const f32, is_euclidean: bool) Payload {
     const rows = result.rows orelse return mod.resultPayload(a, result);
-    if (rows.len < 2) return mod.resultPayload(a, result);
-
     const n = rows.len;
+
     const distances = a.alloc(f32, n) catch return mod.errPayload("Allocation error");
-    defer a.free(distances);
-
     const valid = a.alloc(bool, n) catch return mod.errPayload("Allocation error");
-    defer a.free(valid);
-
     for (rows, 0..) |row, i| {
         const emb = embFromBlob(a, row.values[3] orelse "") catch {
             valid[i] = false;
+            distances[i] = std.math.inf(f32);
             continue;
         };
         valid[i] = emb.len > 0;
         distances[i] = if (valid[i])
-            if (is_euclidean) fusion.euclideanDistance(emb, qvec) else 1.0 - fusion.cosineSimilarity(emb, qvec)
+            (if (is_euclidean) fusion.euclideanDistance(emb, qvec) else 1.0 - fusion.cosineSimilarity(emb, qvec))
         else
             std.math.inf(f32);
     }
 
     const indices = a.alloc(usize, n) catch return mod.errPayload("Allocation error");
-    defer a.free(indices);
     for (0..n) |i| indices[i] = i;
-
     const SortCtx = struct { d: []const f32, v: []const bool };
     std.sort.block(usize, indices, SortCtx{ .d = distances, .v = valid }, struct {
         fn less(ctx: SortCtx, x: usize, y: usize) bool {
@@ -629,19 +632,31 @@ fn reorderKgRows(a: Allocator, result: pool.QueryResult, qvec: []const f32, is_e
         }
     }.less);
 
-    const sorted_rows = a.alloc(sqtypes.Row, n) catch return mod.errPayload("Allocation error");
-    for (indices, 0..) |idx, i| sorted_rows[i] = rows[idx];
+    // Rebuild rows in ranked order, dropping the blob and appending distance.
+    const out_rows = a.alloc(sqtypes.Row, n) catch return mod.errPayload("Allocation error");
+    for (indices, 0..) |idx, i| {
+        const src = rows[idx];
+        const vals = a.alloc(?[]const u8, search_columns.len) catch return mod.errPayload("Allocation error");
+        vals[0] = if (src.values.len > 0) src.values[0] else null;
+        vals[1] = if (src.values.len > 1) src.values[1] else null;
+        vals[2] = if (src.values.len > 2) src.values[2] else null;
+        vals[3] = if (valid[idx])
+            (std.fmt.allocPrint(a, "{d:.6}", .{distances[idx]}) catch return mod.errPayload("Allocation error"))
+        else
+            null;
+        out_rows[i] = .{ .values = vals };
+    }
 
-    const sorted = sqtypes.QueryResult{
-        .rows = sorted_rows,
-        .column_names = result.column_names,
-        .column_kinds = result.column_kinds,
-        .num_fields = result.num_fields,
-        .num_rows = result.num_rows,
-        .affected_rows = result.affected_rows,
-        .insert_id = result.insert_id,
+    const out = sqtypes.QueryResult{
+        .rows = out_rows,
+        .column_names = &search_columns,
+        .column_kinds = &search_kinds,
+        .num_fields = search_columns.len,
+        .num_rows = n,
+        .affected_rows = 0,
+        .insert_id = 0,
     };
-    return mod.resultPayload(a, sorted);
+    return mod.resultPayload(a, out);
 }
 
 pub fn deleteVectorEmbedding(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
