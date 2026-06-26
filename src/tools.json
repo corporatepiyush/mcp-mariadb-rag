@@ -660,6 +660,10 @@
             "type": "string"
           },
           "description": "Optional: restrict retrieval to this set of document ids (metadata pre-filter)."
+        },
+        "trace": {
+          "type": "boolean",
+          "description": "Optional: include per-stage timing/counts (traceId, stages, totalUs) in the response."
         }
       }
     }

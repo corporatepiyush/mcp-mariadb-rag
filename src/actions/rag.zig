@@ -20,6 +20,7 @@ const chunk = @import("../rag/chunk.zig");
 const fusion = @import("../rag/fusion.zig");
 const retrieve = @import("../rag/retrieve.zig");
 const index_store = @import("../index/store.zig");
+const trace = @import("../observe/trace.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -376,11 +377,14 @@ fn writeResult(w: *Writer, c: Candidate, score: f32) !void {
 /// Hybrid retrieval: semantic top-k (vector) ⊕ lexical top-k (LIKE), fused with
 /// Reciprocal Rank Fusion, optionally diversified with MMR. At least one of
 /// `vector` (query embedding) or `query` (text) must be supplied.
-pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
+pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
     const query_text = mod.getStringParam(args, "query");
     const vector_val = mod.getArrayParam(args, "vector");
     if (query_text == null and vector_val == null)
         return mod.errPayload("Provide 'vector' (query embedding) and/or 'query' (text)");
+
+    var tr = trace.Trace.start(io);
+    const want_trace = mod.getBoolParam(args, "trace", false);
 
     const k = getUintParam(args, "k", 10);
     const vec_k = getUintParam(args, "vecK", 30);
@@ -430,6 +434,7 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
             });
         }
     }
+    tr.lap("vector", vec_ids.items.len);
 
     // Lexical candidates.
     if (query_text) |qt| {
@@ -441,11 +446,13 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
             collect(allocator, res, &cmap, &lex_ids) catch return mod.errPayload("Allocation error");
         }
     }
+    tr.lap("lexical", lex_ids.items.len);
 
     // Reciprocal Rank Fusion over the two ranked id lists.
     const lists = [_][]const []const u8{ vec_ids.items, lex_ids.items };
     const fused = fusion.reciprocalRankFusion(allocator, &lists, rrf_k) catch
         return mod.errPayload("Allocation error");
+    tr.lap("fusion", fused.len);
     if (fused.len == 0) return .{ .text = "{\"results\":[],\"count\":0}", .is_error = false };
 
     // Determine output order: plain RRF, or MMR-diversified over the fused set.
@@ -485,8 +492,25 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
         emitted += 1;
         writeResult(w, c, f.score) catch return mod.errPayload("Serialization error");
     }
-    w.print("],\"count\":{d}}}", .{emitted}) catch return mod.errPayload("Serialization error");
+    tr.lap(if (use_mmr) "mmr" else "select", emitted);
+    w.print("],\"count\":{d}", .{emitted}) catch return mod.errPayload("Serialization error");
+    if (want_trace) {
+        w.writeAll(",\"trace\":") catch return mod.errPayload("Serialization error");
+        tr.writeJson(w) catch return mod.errPayload("Serialization error");
+    }
+    w.writeByte('}') catch return mod.errPayload("Serialization error");
+
+    logTrace(&tr);
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
+}
+
+/// Emit the trace as one structured `info` line (best-effort; never fails a
+/// request over a log-formatting hiccup).
+fn logTrace(tr: *const trace.Trace) void {
+    var buf: [256]u8 = undefined;
+    var w = Writer.fixed(&buf);
+    tr.writeLog(&w) catch return;
+    std.log.scoped(.rag).info("rag_search {s}", .{w.buffered()});
 }
 
 /// Pure semantic search over chunks (no lexical/fusion). Streams the whole chunk

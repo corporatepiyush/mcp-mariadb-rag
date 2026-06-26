@@ -23,6 +23,7 @@ comptime {
     _ = @import("src/index/flat.zig");
     _ = @import("src/index/hnsw.zig");
     _ = @import("src/index/store.zig");
+    _ = @import("src/observe/trace.zig");
 
     // ---- Standalone test files -------------------------------------------
     _ = @import("tests/json_test.zig");
