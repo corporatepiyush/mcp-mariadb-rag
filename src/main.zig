@@ -19,6 +19,7 @@ fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
         // RAG document/chunk store same init path.
         schema_rag.writeCreateDocument,
         schema_rag.writeCreateChunk,
+        schema_rag.writeCreateChunkIndex,
     }) |write_fn| {
         var buf: [4096]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
@@ -45,6 +46,14 @@ pub fn main() !void {
 
     std.log.info("Starting MCP KV Server", .{});
 
+    // Capacity-planning preflight: `MCP_DRY_RUN=1` resolves the full knob table
+    // and exits without serving.
+    config.logResolved();
+    if (config.dry_run) {
+        std.log.info("dry run: exiting without serving (MCP_DRY_RUN)", .{});
+        return;
+    }
+
     if (config.server.auth_token == null and !config.server.stdio) {
         std.log.warn("No auth token configured. Set MCP_AUTH_TOKEN for security.", .{});
     }
@@ -53,6 +62,7 @@ pub fn main() !void {
         .min_size = config.pool.min_size,
         .max_size = config.pool.max_size,
         .tls = config.tls,
+        .tuning = config.sqlite,
     });
     defer pool.close();
 

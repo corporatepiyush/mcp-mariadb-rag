@@ -26,7 +26,16 @@ pub const DatabaseConn = struct {
     id: u64,
     db: *sqlite.sqlite3,
 
-    pub fn init(url: []const u8, id: u64, _: TlsConfig) !DatabaseConn {
+    /// Open with the conservative default tuning. Used by tests and any caller
+    /// that hasn't resolved a tier.
+    pub fn init(url: []const u8, id: u64, tls: TlsConfig) !DatabaseConn {
+        return initTuned(url, id, tls, config.SqliteTuning.safe_default);
+    }
+
+    /// Open and apply the tier-scaled storage-engine PRAGMAs (`tuning`). These
+    /// are the IO-axis screws: page cache, memory-mapped I/O window, WAL
+    /// checkpoint cadence, and the durability/throughput `synchronous` dial.
+    pub fn initTuned(url: []const u8, id: u64, _: TlsConfig, tuning: config.SqliteTuning) !DatabaseConn {
         const params = try url_mod.parse(url);
 
         const db = if (params.file_path) |fp| blk: {
@@ -38,11 +47,25 @@ pub const DatabaseConn = struct {
         } else try sqlite.openInMemory();
 
         errdefer sqlite.close(db);
+        try applyPragmas(db, tuning);
+        return .{ .id = id, .db = db };
+    }
+
+    /// Build and run each PRAGMA. `page_size` goes first (it only takes effect on
+    /// a brand-new file); the rest are idempotent per connection.
+    fn applyPragmas(db: *sqlite.sqlite3, tuning: config.SqliteTuning) !void {
+        var buf: [128]u8 = undefined;
+        try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA page_size={d}", .{tuning.page_size}));
         try sqlite.exec(db, "PRAGMA journal_mode=WAL");
         try sqlite.exec(db, "PRAGMA foreign_keys=OFF");
-        try sqlite.check(sqlite.sqlite3_busy_timeout(db, 5000));
+        try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA cache_size=-{d}", .{tuning.cache_kib}));
+        try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA mmap_size={d}", .{tuning.mmap_bytes}));
+        try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA synchronous={s}", .{tuning.synchronous.sql()}));
+        if (tuning.temp_store != .default)
+            try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA temp_store={s}", .{tuning.temp_store.sql()}));
+        try sqlite.exec(db, try std.fmt.bufPrintZ(&buf, "PRAGMA wal_autocheckpoint={d}", .{tuning.wal_autocheckpoint}));
+        try sqlite.check(sqlite.sqlite3_busy_timeout(db, @intCast(tuning.busy_ms)));
         try sqlite.exec(db, "PRAGMA optimize");
-        return .{ .id = id, .db = db };
     }
 
     pub fn deinit(self: *const DatabaseConn) void {
@@ -170,6 +193,9 @@ pub const Options = struct {
     min_size: u32,
     max_size: u32,
     tls: TlsConfig,
+    /// Tier-scaled SQLite PRAGMAs applied to every connection. Defaults to the
+    /// conservative preset so existing callers/tests need no change.
+    tuning: config.SqliteTuning = config.SqliteTuning.safe_default,
 };
 
 pub const ConnectionPool = struct {
@@ -179,6 +205,7 @@ pub const ConnectionPool = struct {
     free_list: ConnList,
     url: []u8,
     tls: TlsConfig,
+    tuning: config.SqliteTuning,
     current_id: u64,
     total_count: u32,
     max_size: u32,
@@ -198,6 +225,7 @@ pub const ConnectionPool = struct {
             .free_list = .empty,
             .url = try allocator.dupe(u8, url),
             .tls = options.tls,
+            .tuning = options.tuning,
             .current_id = 0,
             .total_count = 0,
             .max_size = effective_max,
@@ -213,7 +241,7 @@ pub const ConnectionPool = struct {
         }
 
         for (0..options.min_size) |_| {
-            const conn = try DatabaseConn.init(url, pool.nextId(), options.tls);
+            const conn = try DatabaseConn.initTuned(url, pool.nextId(), options.tls, options.tuning);
             pool.free_list.appendAssumeCapacity(conn);
             pool.total_count += 1;
         }
@@ -249,8 +277,9 @@ pub const ConnectionPool = struct {
                 self.total_count += 1;
                 const id = self.nextId();
                 const tls = self.tls;
+                const tuning = self.tuning;
                 self.unlock();
-                const conn = DatabaseConn.init(self.url, id, tls) catch {
+                const conn = DatabaseConn.initTuned(self.url, id, tls, tuning) catch {
                     self.lock();
                     self.total_count -= 1;
                     self.cond.signal(self.io);

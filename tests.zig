@@ -4,6 +4,7 @@
 comptime {
     // ---- Source module inline tests --------------------------------------
     _ = @import("src/sqlite.zig");
+    _ = @import("src/config.zig");
     _ = @import("src/json.zig");
     _ = @import("src/url.zig");
     _ = @import("src/validation.zig");
@@ -17,6 +18,9 @@ comptime {
     _ = @import("src/rag/chunk.zig");
     _ = @import("src/rag/fusion.zig");
     _ = @import("src/rag/query.zig");
+    _ = @import("src/rag/retrieve.zig");
+    _ = @import("src/embed/quant.zig");
+    _ = @import("src/index/flat.zig");
 
     // ---- Standalone test files -------------------------------------------
     _ = @import("tests/json_test.zig");
