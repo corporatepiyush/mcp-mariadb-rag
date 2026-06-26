@@ -51,6 +51,50 @@ pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
     return if (std.math.isFinite(sum)) @sqrt(sum) else std.math.inf(f32);
 }
 
+// ── Quantized distance kernels ────────────────────────────────────────
+// Consumed by the int8 / binary storage schemes in `embed/quant.zig`. The
+// symmetric int8 scale cancels in a cosine ratio, so these need no scale arg.
+
+/// Cosine similarity over symmetric-int8 quanta. Accumulates the dot product and
+/// both squared norms in i32 (a 384-wide vector of i8·i8 maxes out at
+/// 384·127·127 ≈ 6.2 M, far inside i32), then does one float divide. Because the
+/// per-vector scales are symmetric they divide out of the ratio exactly, so this
+/// approximates `cosineSimilarity` of the original f32 vectors directly.
+pub fn cosineSimilarityI8(a: []const i8, b: []const i8) f32 {
+    const n = @min(a.len, b.len);
+    var dot: i32 = 0;
+    var na: i32 = 0;
+    var nb: i32 = 0;
+    for (0..n) |i| {
+        const x: i32 = a[i];
+        const y: i32 = b[i];
+        dot += x * y;
+        na += x * x;
+        nb += y * y;
+    }
+    if (na == 0 or nb == 0) return 0;
+    const denom = @sqrt(@as(f32, @floatFromInt(na)) * @as(f32, @floatFromInt(nb)));
+    const sim = @as(f32, @floatFromInt(dot)) / denom;
+    return std.math.clamp(sim, -1, 1);
+}
+
+/// Hamming distance between two packed sign-bit vectors (8 dims/byte), counting
+/// differing bits via `@popCount`. Reads 8 bytes at a time as a `u64` lane
+/// (≈ 32× the f32 throughput) with a byte tail. This is the cheap pre-filter in
+/// the "binary + rerank" pattern; survivors are reranked with exact vectors.
+pub fn hammingDistance(a: []const u8, b: []const u8) u32 {
+    const n = @min(a.len, b.len);
+    var dist: u32 = 0;
+    var i: usize = 0;
+    while (i + 8 <= n) : (i += 8) {
+        const xa = std.mem.readInt(u64, a[i..][0..8], .little);
+        const xb = std.mem.readInt(u64, b[i..][0..8], .little);
+        dist += @popCount(xa ^ xb);
+    }
+    while (i < n) : (i += 1) dist += @popCount(a[i] ^ b[i]);
+    return dist;
+}
+
 // ── Reciprocal Rank Fusion ────────────────────────────────────────────
 
 pub const Fused = struct { id: []const u8, score: f32 };
@@ -196,6 +240,57 @@ test "cosine: 384-wide stress" {
     const s = cosineSimilarity(&a, &b);
     try testing.expect(std.math.isFinite(s));
     try testing.expect(s >= -1.0001 and s <= 1.0001);
+}
+
+test "cosineI8: identical quanta yield ~1, opposite ~-1, orthogonal ~0" {
+    var a = [_]i8{ 100, 50, -25 };
+    try testing.expectApproxEqAbs(@as(f32, 1.0), cosineSimilarityI8(&a, &a), 1e-5);
+
+    var p = [_]i8{ 100, 100 };
+    var q = [_]i8{ -100, -100 };
+    try testing.expectApproxEqAbs(@as(f32, -1.0), cosineSimilarityI8(&p, &q), 1e-5);
+
+    var x = [_]i8{ 127, 0 };
+    var y = [_]i8{ 0, 127 };
+    try testing.expectApproxEqAbs(@as(f32, 0.0), cosineSimilarityI8(&x, &y), 1e-5);
+}
+
+test "cosineI8: zero vector yields 0, stays in range" {
+    var z = [_]i8{ 0, 0, 0 };
+    var u = [_]i8{ 1, 2, 3 };
+    try testing.expectEqual(@as(f32, 0), cosineSimilarityI8(&z, &u));
+    const s = cosineSimilarityI8(&u, &u);
+    try testing.expect(s >= -1 and s <= 1);
+}
+
+test "cosineI8: tracks f32 cosine on the same direction" {
+    // Quantizing a vector and its scaled-down copy should still read as parallel.
+    var a = [_]i8{ 120, -60, 30, -90 };
+    var b = [_]i8{ 40, -20, 10, -30 }; // a/3, same direction
+    try testing.expectApproxEqAbs(@as(f32, 1.0), cosineSimilarityI8(&a, &b), 1e-3);
+}
+
+test "hamming: identical=0, all-different=bit count" {
+    const a = [_]u8{ 0b1010_1010, 0b1111_0000 };
+    try testing.expectEqual(@as(u32, 0), hammingDistance(&a, &a));
+
+    const x = [_]u8{0b0000_0000};
+    const y = [_]u8{0b1111_1111};
+    try testing.expectEqual(@as(u32, 8), hammingDistance(&x, &y));
+}
+
+test "hamming: u64 lane path + byte tail agree with scalar" {
+    var prng = std.Random.DefaultPrng.init(0x77AA);
+    const rnd = prng.random();
+    var a: [21]u8 = undefined; // 2 lanes + 5-byte tail
+    var b: [21]u8 = undefined;
+    for (&a, &b) |*x, *y| {
+        x.* = rnd.int(u8);
+        y.* = rnd.int(u8);
+    }
+    var scalar: u32 = 0;
+    for (a, b) |xa, xb| scalar += @popCount(xa ^ xb);
+    try testing.expectEqual(scalar, hammingDistance(&a, &b));
 }
 
 test "euclidean: identity is zero" {
