@@ -57,7 +57,8 @@ pub const Metric = enum {
 
 // ── Document operations ───────────────────────────────────────────────
 
-/// Upsert a document row by its string id. `metadata` is a raw JSON object.
+/// Upsert a document row by its string id. `metadata` is a raw JSON object;
+/// `content_hash` is a digest used for idempotent re-ingest (skip on no change).
 pub fn writeUpsertDocument(
     w: *Writer,
     id: []const u8,
@@ -65,10 +66,11 @@ pub fn writeUpsertDocument(
     title: []const u8,
     metadata: []const u8,
     chunk_count: u64,
+    content_hash: []const u8,
 ) !void {
     try w.writeAll("INSERT INTO ");
     try validation.writeQuotedIdent(w, schema.document_table);
-    try w.writeAll(" (id, uri, title, metadata, chunk_count) VALUES (");
+    try w.writeAll(" (id, uri, title, metadata, chunk_count, content_hash) VALUES (");
     try writeSqlLiteral(w, id);
     try w.writeByte(',');
     try writeSqlLiteral(w, uri);
@@ -76,8 +78,18 @@ pub fn writeUpsertDocument(
     try writeSqlLiteral(w, title);
     try w.writeByte(',');
     try writeSqlLiteral(w, metadata);
-    try w.print(",{d})", .{chunk_count});
-    try w.writeAll(" ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count");
+    try w.print(",{d},", .{chunk_count});
+    try writeSqlLiteral(w, content_hash);
+    try w.writeByte(')');
+    try w.writeAll(" ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count, content_hash=excluded.content_hash");
+}
+
+/// `SELECT content_hash FROM rag_document WHERE id = '<id>'` — the dedup probe.
+pub fn writeGetDocumentHash(w: *Writer, id: []const u8) !void {
+    try w.writeAll("SELECT content_hash FROM ");
+    try validation.writeQuotedIdent(w, schema.document_table);
+    try w.writeAll(" WHERE id = ");
+    try writeSqlLiteral(w, id);
 }
 
 /// `SELECT id, uri, title, metadata, chunk_count FROM rag_document WHERE id = '<id>'`
@@ -243,16 +255,24 @@ fn renderSql(buf: []u8, comptime f: anytype, args: anytype) ![]u8 {
 test "writeUpsertDocument" {
     var buf: [1024]u8 = undefined;
     try testing.expectEqualStrings(
-        "INSERT INTO `rag_document` (id, uri, title, metadata, chunk_count) VALUES ('d1','file://x','Title','{}',3) ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count",
-        try renderSql(&buf, writeUpsertDocument, .{ "d1", "file://x", "Title", "{}", @as(u64, 3) }),
+        "INSERT INTO `rag_document` (id, uri, title, metadata, chunk_count, content_hash) VALUES ('d1','file://x','Title','{}',3,'abc123') ON CONFLICT(id) DO UPDATE SET uri=excluded.uri, title=excluded.title, metadata=excluded.metadata, chunk_count=excluded.chunk_count, content_hash=excluded.content_hash",
+        try renderSql(&buf, writeUpsertDocument, .{ "d1", "file://x", "Title", "{}", @as(u64, 3), "abc123" }),
     );
 }
 
 test "writeUpsertDocument escapes quotes" {
     var buf: [1024]u8 = undefined;
-    const out = try renderSql(&buf, writeUpsertDocument, .{ "d'1", "u", "O'Hara", "{}", @as(u64, 0) });
+    const out = try renderSql(&buf, writeUpsertDocument, .{ "d'1", "u", "O'Hara", "{}", @as(u64, 0), "h" });
     try testing.expect(std.mem.indexOf(u8, out, "'d''1'") != null);
     try testing.expect(std.mem.indexOf(u8, out, "'O''Hara'") != null);
+}
+
+test "writeGetDocumentHash" {
+    var buf: [256]u8 = undefined;
+    try testing.expectEqualStrings(
+        "SELECT content_hash FROM `rag_document` WHERE id = 'd1'",
+        try renderSql(&buf, writeGetDocumentHash, .{"d1"}),
+    );
 }
 
 test "writeGetDocument" {

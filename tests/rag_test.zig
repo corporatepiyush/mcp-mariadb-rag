@@ -128,6 +128,39 @@ test "rag_integration: ingest -> stats -> get -> delete" {
     try testing.expect(std.mem.indexOf(u8, st2.text, "\"document_count\":0") != null);
 }
 
+test "rag_integration: re-ingesting identical content is deduped (skipped)" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // First ingest writes all chunks.
+    const first = rag.ingestDocument(io, a, &conn, parseJson(a, ingestArgs(a)));
+    try testing.expect(!first.is_error);
+    try testing.expect(std.mem.indexOf(u8, first.text, "\"chunks_ingested\":3") != null);
+
+    // Re-ingesting the identical document is a no-op: skipped, nothing rewritten.
+    const second = rag.ingestDocument(io, a, &conn, parseJson(a, ingestArgs(a)));
+    try testing.expect(!second.is_error);
+    try testing.expect(std.mem.indexOf(u8, second.text, "\"skipped\":true") != null);
+    try testing.expect(std.mem.indexOf(u8, second.text, "\"chunks_ingested\":0") != null);
+}
+
 test "rag_integration: hybrid search surfaces the relevant chunk" {
     const url = dbUrl() orelse return;
 

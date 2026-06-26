@@ -45,6 +45,7 @@ pub fn writeCreateDocument(w: *Writer) !void {
         \\    title TEXT NOT NULL DEFAULT '',
         \\    metadata TEXT NOT NULL,
         \\    chunk_count INTEGER NOT NULL DEFAULT 0,
+        \\    content_hash TEXT NOT NULL DEFAULT '',
         \\    created_at TEXT DEFAULT (datetime('now')),
         \\    updated_at TEXT DEFAULT (datetime('now'))
         \\) STRICT
@@ -92,6 +93,7 @@ test "writeCreateDocument" {
     try testing.expect(std.mem.indexOf(u8, result, "CREATE TABLE IF NOT EXISTS `rag_document`") != null);
     try testing.expect(std.mem.indexOf(u8, result, "id TEXT NOT NULL PRIMARY KEY") != null);
     try testing.expect(std.mem.indexOf(u8, result, "chunk_count INTEGER NOT NULL DEFAULT 0") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "content_hash TEXT NOT NULL DEFAULT ''") != null);
     try testing.expect(std.mem.indexOf(u8, result, "AUTO_INCREMENT") == null);
 }
 

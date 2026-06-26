@@ -112,6 +112,41 @@ fn parseDocFilter(allocator: Allocator, args: ?Value) ?[]const []const u8 {
     return null;
 }
 
+/// Digest of everything that defines a document's stored state — id, metadata,
+/// and every chunk's content + embedding bytes. Hex u64; cheap and collision-
+/// safe enough for change detection.
+fn contentHash(
+    allocator: Allocator,
+    id: []const u8,
+    uri: []const u8,
+    title: []const u8,
+    metadata: []const u8,
+    rows: []const query.ChunkRow,
+) ![]const u8 {
+    var h = std.hash.Wyhash.init(0xD0C_15A_FE);
+    h.update(id);
+    h.update(uri);
+    h.update(title);
+    h.update(metadata);
+    for (rows) |r| {
+        h.update(r.content);
+        h.update(std.mem.sliceAsBytes(r.vector));
+        h.update("\x00"); // field delimiter
+    }
+    return std.fmt.allocPrint(allocator, "{x}", .{h.final()});
+}
+
+/// True iff the document already exists with exactly this `hash`.
+fn documentHashMatches(allocator: Allocator, conn: *PooledConn, id: []const u8, hash: []const u8) bool {
+    const sql = mod.renderToOwned(allocator, query.writeGetDocumentHash, .{id}) catch return false;
+    defer allocator.free(sql);
+    const res = conn.query(allocator, sql) catch return false;
+    const rows = res.rows orelse return false;
+    if (rows.len == 0) return false;
+    const existing = rows[0].values[0] orelse return false;
+    return std.mem.eql(u8, existing, hash);
+}
+
 /// Invalidate derived caches after a committed write: the ANN index rebuilds on
 /// the next search, and stale cached answers are dropped. Both are no-ops when
 /// unset/disabled.
@@ -276,7 +311,21 @@ pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
 
     const rows = parseChunkRows(allocator, id, chunks_val.items) catch |err| return errFromChunkParse(allocator, err);
 
-    const doc_sql = mod.renderToOwned(allocator, query.writeUpsertDocument, .{ id, uri, title, metadata, rows.len }) catch
+    // Content-hash dedup: if this id already holds identical content (chunks +
+    // metadata), skip the write and the index/cache invalidation entirely.
+    const hash = contentHash(allocator, id, uri, title, metadata, rows) catch
+        return mod.errPayload("Allocation error");
+    if (documentHashMatches(allocator, conn, id, hash)) {
+        var aw = Writer.Allocating.init(allocator);
+        defer aw.deinit();
+        const w = &aw.writer;
+        w.writeAll("{\"id\":") catch return mod.errPayload("Serialization error");
+        jsonStr(w, id) catch return mod.errPayload("Serialization error");
+        w.print(",\"chunks_ingested\":0,\"skipped\":true}}", .{}) catch return mod.errPayload("Serialization error");
+        return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
+    }
+
+    const doc_sql = mod.renderToOwned(allocator, query.writeUpsertDocument, .{ id, uri, title, metadata, rows.len, hash }) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(doc_sql);
     const chunk_sql = mod.renderToOwned(allocator, query.writeUpsertChunks, .{rows}) catch
