@@ -169,14 +169,10 @@ pub fn writeVectorScanAll(w: *Writer) !void {
     try validation.writeQuotedIdent(w, schema.chunk_table);
 }
 
-/// Fetch the row payload for an explicit set of chunk ids — the hydration step
-/// that fills `content`/`document_id`/`ordinal` for the top-k survivors of the
-/// vector scan. Caller must guarantee `ids.len > 0`.
-/// `SELECT id, document_id, ordinal, content FROM rag_chunk WHERE id IN ('a','b')`
-pub fn writeChunksByIds(w: *Writer, ids: []const []const u8) !void {
-    try w.writeAll("SELECT id, document_id, ordinal, content FROM ");
-    try validation.writeQuotedIdent(w, schema.chunk_table);
-    try w.writeAll(" WHERE id IN (");
+/// `<column> IN ('a','b',…)` with each id escaped. Caller guarantees `ids.len > 0`.
+fn writeInList(w: *Writer, column: []const u8, ids: []const []const u8) !void {
+    try w.writeAll(column);
+    try w.writeAll(" IN (");
     for (ids, 0..) |id, i| {
         if (i > 0) try w.writeByte(',');
         try writeSqlLiteral(w, id);
@@ -184,14 +180,42 @@ pub fn writeChunksByIds(w: *Writer, ids: []const []const u8) !void {
     try w.writeByte(')');
 }
 
+/// Document-scoped variant of the full vector scan: restricts the scan to chunks
+/// whose `document_id` is in `doc_ids` (metadata pre-filtering — PLAN.md §2),
+/// which the planner serves via `idx_chunk_doc` instead of a full table scan.
+/// Caller guarantees `doc_ids.len > 0`.
+/// `SELECT id, embedding FROM rag_chunk WHERE document_id IN ('a','b')`
+pub fn writeVectorScanByDocuments(w: *Writer, doc_ids: []const []const u8) !void {
+    try w.writeAll("SELECT id, embedding FROM ");
+    try validation.writeQuotedIdent(w, schema.chunk_table);
+    try w.writeAll(" WHERE ");
+    try writeInList(w, "document_id", doc_ids);
+}
+
+/// Fetch the row payload for an explicit set of chunk ids — the hydration step
+/// that fills `content`/`document_id`/`ordinal` for the top-k survivors of the
+/// vector scan. Caller must guarantee `ids.len > 0`.
+/// `SELECT id, document_id, ordinal, content FROM rag_chunk WHERE id IN ('a','b')`
+pub fn writeChunksByIds(w: *Writer, ids: []const []const u8) !void {
+    try w.writeAll("SELECT id, document_id, ordinal, content FROM ");
+    try validation.writeQuotedIdent(w, schema.chunk_table);
+    try w.writeAll(" WHERE ");
+    try writeInList(w, "id", ids);
+}
+
 /// Lexical top-k by substring match. Ordered by content length ascending as a
 /// simple match-density proxy (shorter chunks containing the term score higher);
 /// RRF only needs a stable rank, the semantic side carries the fine ordering.
-pub fn writeLexicalTopK(w: *Writer, query: []const u8, k: u64) !void {
+/// When `doc_ids` is non-null the match is scoped to those documents.
+pub fn writeLexicalTopK(w: *Writer, query: []const u8, k: u64, doc_ids: ?[]const []const u8) !void {
     try w.writeAll("SELECT id, document_id, ordinal, content, embedding FROM ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
     try w.writeAll(" WHERE content ");
     try writeLikeContains(w, query);
+    if (doc_ids) |ids| {
+        try w.writeAll(" AND ");
+        try writeInList(w, "document_id", ids);
+    }
     try w.print(" ORDER BY LENGTH(content) LIMIT {d}", .{k});
 }
 
@@ -285,16 +309,35 @@ test "writeChunksByIds builds an escaped IN list" {
 
 test "writeLexicalTopK builds escaped LIKE, uses LENGTH" {
     var buf: [1024]u8 = undefined;
-    const out = try renderSql(&buf, writeLexicalTopK, .{ "neural", @as(u64, 8) });
+    const out = try renderSql(&buf, writeLexicalTopK, .{ "neural", @as(u64, 8), @as(?[]const []const u8, null) });
     try testing.expect(std.mem.indexOf(u8, out, "WHERE content LIKE '%neural%'") != null);
     try testing.expect(std.mem.indexOf(u8, out, "ORDER BY LENGTH(content) LIMIT 8") != null);
     try testing.expect(std.mem.indexOf(u8, out, "||") == null);
+    try testing.expect(std.mem.indexOf(u8, out, "document_id IN") == null); // no filter
 }
 
 test "writeLexicalTopK escapes quotes in query" {
     var buf: [1024]u8 = undefined;
-    const out = try renderSql(&buf, writeLexicalTopK, .{ "O'Brien", @as(u64, 3) });
+    const out = try renderSql(&buf, writeLexicalTopK, .{ "O'Brien", @as(u64, 3), @as(?[]const []const u8, null) });
     try testing.expect(std.mem.indexOf(u8, out, "LIKE '%O''Brien%'") != null);
+}
+
+test "writeLexicalTopK scopes to documents when filtered" {
+    var buf: [1024]u8 = undefined;
+    const ids = [_][]const u8{ "d1", "d2" };
+    const out = try renderSql(&buf, writeLexicalTopK, .{ "neural", @as(u64, 5), @as(?[]const []const u8, &ids) });
+    try testing.expect(std.mem.indexOf(u8, out, "WHERE content LIKE '%neural%' AND document_id IN ('d1','d2')") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "ORDER BY LENGTH(content) LIMIT 5") != null);
+}
+
+test "writeVectorScanByDocuments restricts to the document set" {
+    var buf: [1024]u8 = undefined;
+    const ids = [_][]const u8{ "d1", "O'Hara" };
+    const out = try renderSql(&buf, writeVectorScanByDocuments, .{@as([]const []const u8, &ids)});
+    try testing.expectEqualStrings(
+        "SELECT id, embedding FROM `rag_chunk` WHERE document_id IN ('d1','O''Hara')",
+        out,
+    );
 }
 
 test "writeRagStatistics single round-trip" {

@@ -649,6 +649,17 @@
         "rrfK": {
           "type": "number",
           "description": "RRF constant (default 60)."
+        },
+        "documentId": {
+          "type": "string",
+          "description": "Optional: restrict retrieval to a single document id (metadata pre-filter)."
+        },
+        "documentIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional: restrict retrieval to this set of document ids (metadata pre-filter)."
         }
       }
     }
@@ -676,6 +687,17 @@
             "euclidean",
             "cosine"
           ]
+        },
+        "documentId": {
+          "type": "string",
+          "description": "Optional: restrict retrieval to a single document id (metadata pre-filter)."
+        },
+        "documentIds": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional: restrict retrieval to this set of document ids (metadata pre-filter)."
         }
       },
       "required": [

@@ -192,13 +192,19 @@ fn queryPlan(db: *sqlite.sqlite3, a: Allocator, sql: []const u8) ![]const u8 {
     return aw.written();
 }
 
-/// Insert one chunk with a uniform embedding (all components == `fill`).
+/// Insert one chunk (document "doc", id "c<ord>") with a uniform embedding.
 fn insertChunk(db: *sqlite.sqlite3, a: Allocator, ord: usize, fill: f32) !void {
+    const id = try std.fmt.allocPrint(a, "c{d}", .{ord});
+    try insertChunkRow(db, a, id, "doc", ord, fill);
+}
+
+/// Insert one chunk under an explicit id + document id.
+fn insertChunkRow(db: *sqlite.sqlite3, a: Allocator, id: []const u8, doc: []const u8, ord: usize, fill: f32) !void {
     var vec: [8]f32 = undefined;
     @memset(&vec, fill);
     const rows = [_]query.ChunkRow{.{
-        .id = try std.fmt.allocPrint(a, "c{d}", .{ord}),
-        .document_id = "doc",
+        .id = id,
+        .document_id = doc,
         .ordinal = ord,
         .content = try std.fmt.allocPrint(a, "chunk {d}", .{ord}),
         .token_count = 2,
@@ -339,6 +345,36 @@ test "vector scan touches only id+embedding; hydration is a separate lookup" {
     var seen: usize = 0;
     while (sqlite.sqlite3_step(stmt) == sqlite.SQLITE_ROW) seen += 1;
     try testing.expectEqual(@as(usize, 2), seen);
+}
+
+test "document-scoped scan only returns chunks from the filtered document" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const db = try sqlite.openInMemory();
+    defer sqlite.close(db);
+    try createSchema(db, a);
+
+    // docA holds the vectors nearest the query (fill 0.5); docB is noise but
+    // would otherwise dominate by count. The filter must exclude docB entirely.
+    try insertChunkRow(db, a, "a0", "docA", 0, 0.50);
+    try insertChunkRow(db, a, "a1", "docA", 1, 0.49);
+    for (0..20) |i| try insertChunkRow(db, a, try std.fmt.allocPrint(a, "b{d}", .{i}), "docB", i, 0.50);
+
+    var qvec: [8]f32 = undefined;
+    @memset(&qvec, 0.50);
+
+    // Scope to docA: only a0/a1 may appear despite docB also sitting at 0.50.
+    const filtered_sql = blk: {
+        const ids = [_][]const u8{"docA"};
+        var aw = std.Io.Writer.Allocating.init(a);
+        try query.writeVectorScanByDocuments(&aw.writer, &ids);
+        break :blk aw.written();
+    };
+    const matches = try vectorScanTopK(db, a, filtered_sql, &qvec, .euclidean, 10);
+    try testing.expectEqual(@as(usize, 2), matches.len);
+    for (matches) |m| try testing.expectEqualStrings("docA", m.document_id);
 }
 
 test "hydration is robust to an id vanishing between scan and fetch" {

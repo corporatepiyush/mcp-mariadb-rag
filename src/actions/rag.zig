@@ -80,6 +80,35 @@ fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
     return out;
 }
 
+/// Parse an optional document pre-filter from `documentId` (string) or
+/// `documentIds` (array of strings). Returns the arena-owned id slice, or null
+/// when no filter is supplied. An empty/invalid `documentIds` also yields null
+/// (no filter) rather than an error, so a malformed filter degrades to an
+/// unscoped search instead of returning nothing.
+fn parseDocFilter(allocator: Allocator, args: ?Value) ?[]const []const u8 {
+    const a = args orelse return null;
+    if (a != .object) return null;
+    if (a.object.get("documentId")) |v| {
+        if (v == .string and v.string.len > 0) {
+            const out = allocator.alloc([]const u8, 1) catch return null;
+            out[0] = v.string;
+            return out;
+        }
+    }
+    if (a.object.get("documentIds")) |v| {
+        if (v == .array and v.array.items.len > 0) {
+            var list: std.ArrayList([]const u8) = .empty;
+            list.ensureTotalCapacity(allocator, v.array.items.len) catch return null;
+            for (v.array.items) |item| {
+                if (item == .string and item.string.len > 0) list.appendAssumeCapacity(item.string);
+            }
+            if (list.items.len == 0) return null;
+            return list.items;
+        }
+    }
+    return null;
+}
+
 /// "<what> must have exactly <N> dimensions" — N is the runtime MCP_EMBED_DIMS,
 /// so the message tells the operator the actual configured width.
 fn dimErr(allocator: Allocator, what: []const u8) Payload {
@@ -338,6 +367,9 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
     const use_mmr = mod.getBoolParam(args, "mmr", false);
     const lambda = getFloatParam(args, "lambda", 0.5);
     const rrf_k = getFloatParam(args, "rrfK", fusion.default_rrf_k);
+    // Optional metadata pre-filter: restrict both retrieval arms to a document
+    // set before scoring (uses idx_chunk_doc on the vector arm).
+    const doc_filter = parseDocFilter(allocator, args);
 
     var cmap: std.StringHashMapUnmanaged(Candidate) = .empty;
     defer cmap.deinit(allocator);
@@ -355,7 +387,10 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
             error.NotNumber => mod.errPayload("Query 'vector' must contain only numbers"),
             else => mod.errPayload("Allocation error"),
         };
-        const sql = mod.renderToOwned(allocator, query.writeVectorScanAll, .{}) catch
+        const sql = (if (doc_filter) |ids|
+            mod.renderToOwned(allocator, query.writeVectorScanByDocuments, .{ids})
+        else
+            mod.renderToOwned(allocator, query.writeVectorScanAll, .{})) catch
             return mod.errPayload("Allocation error");
         defer allocator.free(sql);
         const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qvec, metric, vec_k) catch
@@ -377,7 +412,7 @@ pub fn search(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payl
     // Lexical candidates.
     if (query_text) |qt| {
         if (qt.len > 0) {
-            const sql = mod.renderToOwned(allocator, query.writeLexicalTopK, .{ qt, text_k }) catch
+            const sql = mod.renderToOwned(allocator, query.writeLexicalTopK, .{ qt, text_k, doc_filter }) catch
                 return mod.errPayload("Allocation error");
             defer allocator.free(sql);
             const res = conn.query(allocator, sql) catch return mod.errPayload("Lexical query failed");
@@ -446,7 +481,11 @@ pub fn vectorSearch(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
         error.NotNumber => mod.errPayload("'vector' must contain only numbers"),
         else => mod.errPayload("Allocation error"),
     };
-    const sql = mod.renderToOwned(allocator, query.writeVectorScanAll, .{}) catch
+    const doc_filter = parseDocFilter(allocator, args);
+    const sql = (if (doc_filter) |ids|
+        mod.renderToOwned(allocator, query.writeVectorScanByDocuments, .{ids})
+    else
+        mod.renderToOwned(allocator, query.writeVectorScanAll, .{})) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(sql);
     const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qvec, metric, k) catch
