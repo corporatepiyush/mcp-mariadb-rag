@@ -21,6 +21,7 @@ const fusion = @import("../rag/fusion.zig");
 const retrieve = @import("../rag/retrieve.zig");
 const index_store = @import("../index/store.zig");
 const trace = @import("../observe/trace.zig");
+const query_cache = @import("../generate/cache.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -111,10 +112,12 @@ fn parseDocFilter(allocator: Allocator, args: ?Value) ?[]const []const u8 {
     return null;
 }
 
-/// Invalidate the ANN index cache after a committed write so the next search
-/// rebuilds against the new corpus. No-op when the index is disabled/unset.
+/// Invalidate derived caches after a committed write: the ANN index rebuilds on
+/// the next search, and stale cached answers are dropped. Both are no-ops when
+/// unset/disabled.
 fn invalidateIndex() void {
     if (index_store.global()) |st| st.bumpEpoch();
+    if (query_cache.global()) |qc| qc.clear();
 }
 
 /// "<what> must have exactly <N> dimensions" — N is the runtime MCP_EMBED_DIMS,
@@ -397,6 +400,23 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
     // set before scoring (uses idx_chunk_doc on the vector arm).
     const doc_filter = parseDocFilter(allocator, args);
 
+    // Parse the query embedding once (the cache key and the vector arm share it).
+    const qvec: ?[]f32 = if (vector_val) |vv| (embeddingExact(allocator, .{ .array = vv }) catch |err| return switch (err) {
+        error.BadDim => dimErr(allocator, "Query 'vector'"),
+        error.NotNumber => mod.errPayload("Query 'vector' must contain only numbers"),
+        else => mod.errPayload("Allocation error"),
+    }) else null;
+
+    // Semantic cache: a near-identical prior query with identical parameters
+    // returns its cached response, skipping retrieval entirely. Bypassed when a
+    // trace is requested so timings always reflect a real run.
+    const sig = paramSig(query_text, k, vec_k, text_k, metric, use_mmr, lambda, rrf_k, doc_filter);
+    if (!want_trace) {
+        if (qvec) |qv| if (query_cache.global()) |qc| {
+            if (qc.get(allocator, qv, sig)) |cached| return .{ .text = cached, .is_error = false };
+        };
+    }
+
     var cmap: std.StringHashMapUnmanaged(Candidate) = .empty;
     defer cmap.deinit(allocator);
     var vec_ids: std.ArrayList([]const u8) = .empty;
@@ -407,19 +427,14 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
     // Semantic candidates: a full streaming scan that keeps the true top-`vec_k`
     // by vector distance (correct recall regardless of corpus size), already
     // ordered nearest-first by the heap selector.
-    if (vector_val) |vv| {
-        const qvec = embeddingExact(allocator, .{ .array = vv }) catch |err| return switch (err) {
-            error.BadDim => dimErr(allocator, "Query 'vector'"),
-            error.NotNumber => mod.errPayload("Query 'vector' must contain only numbers"),
-            else => mod.errPayload("Allocation error"),
-        };
+    if (qvec) |qv| {
         const sql = (if (doc_filter) |ids|
             mod.renderToOwned(allocator, query.writeVectorScanByDocuments, .{ids})
         else
             mod.renderToOwned(allocator, query.writeVectorScanAll, .{})) catch
             return mod.errPayload("Allocation error");
         defer allocator.free(sql);
-        const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qvec, metric, vec_k) catch
+        const matches = retrieve.vectorScanTopK(conn.conn.db, allocator, sql, qv, metric, vec_k) catch
             return mod.errPayload("Vector query failed");
         cmap.ensureUnusedCapacity(allocator, @intCast(matches.len)) catch return mod.errPayload("Allocation error");
         vec_ids.ensureUnusedCapacity(allocator, matches.len) catch return mod.errPayload("Allocation error");
@@ -501,7 +516,40 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
     w.writeByte('}') catch return mod.errPayload("Serialization error");
 
     logTrace(&tr);
-    return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
+    const out = aw.toOwnedSlice() catch return mod.errPayload("Allocation error");
+    // Populate the semantic cache for a future near-identical query.
+    if (!want_trace) {
+        if (qvec) |qv| if (query_cache.global()) |qc| qc.put(qv, sig, out);
+    }
+    return .{ .text = out, .is_error = false };
+}
+
+/// Stable hash of every parameter that changes the result set, so the semantic
+/// cache only reuses a response for an identical query shape.
+fn paramSig(
+    query_text: ?[]const u8,
+    k: u64,
+    vec_k: u64,
+    text_k: u64,
+    metric: query.Metric,
+    use_mmr: bool,
+    lambda: f32,
+    rrf_k: f32,
+    doc_filter: ?[]const []const u8,
+) u64 {
+    var h = std.hash.Wyhash.init(0x4147_5349_4748);
+    h.update(std.mem.asBytes(&k));
+    h.update(std.mem.asBytes(&vec_k));
+    h.update(std.mem.asBytes(&text_k));
+    h.update(&[_]u8{ @intFromEnum(metric), @intFromBool(use_mmr) });
+    h.update(std.mem.asBytes(&lambda));
+    h.update(std.mem.asBytes(&rrf_k));
+    if (query_text) |q| h.update(q);
+    if (doc_filter) |ids| for (ids) |id| {
+        h.update(id);
+        h.update("\x00"); // delimiter so ["ab","c"] ≠ ["a","bc"]
+    };
+    return h.final();
 }
 
 /// Emit the trace as one structured `info` line (best-effort; never fails a

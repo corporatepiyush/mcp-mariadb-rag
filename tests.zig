@@ -24,6 +24,7 @@ comptime {
     _ = @import("src/index/hnsw.zig");
     _ = @import("src/index/store.zig");
     _ = @import("src/observe/trace.zig");
+    _ = @import("src/generate/cache.zig");
 
     // ---- Standalone test files -------------------------------------------
     _ = @import("tests/json_test.zig");

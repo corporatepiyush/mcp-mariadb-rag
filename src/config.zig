@@ -225,6 +225,9 @@ pub const Config = struct {
     hnsw_m: u32 = 16,
     hnsw_ef_construction: u32 = 200,
     hnsw_ef_search: u32 = 64,
+    // ── Semantic query cache ──
+    qcache_entries: u32 = 0,
+    qcache_threshold: f32 = 0.97,
     sqlite: SqliteTuning = SqliteTuning.safe_default,
     /// Print the resolved-config table and exit without serving (capacity
     /// preflight). Also settable via the `--print-config` CLI flag.
@@ -256,6 +259,7 @@ pub const Config = struct {
             self.hnsw_ef_construction,
             self.hnsw_ef_search,
         });
+        log.info("qcache: entries={d} threshold={d:.3}", .{ self.qcache_entries, self.qcache_threshold });
         log.info("sqlite: cache={d}MB mmap={d}MB page_size={d} synchronous={s} temp_store={s} wal_ckpt={d} busy_ms={d}", .{
             self.sqlite.cache_kib / 1024,
             self.sqlite.mmap_bytes / (1024 * 1024),
@@ -311,6 +315,25 @@ fn envU64(name: []const u8, default: u64) u64 {
         return std.fmt.parseInt(u64, val, 10) catch default;
     }
     return default;
+}
+
+fn envF32(name: []const u8, default: f32) f32 {
+    const v = c.getenv(@ptrCast(name.ptr));
+    if (v) |ptr| {
+        const val = std.mem.sliceTo(ptr, 0);
+        return std.fmt.parseFloat(f32, val) catch default;
+    }
+    return default;
+}
+
+/// Tier-scaled default for the semantic query cache size, in entries.
+fn tierQCacheEntries(t: Tier) u32 {
+    return switch (t) {
+        .mobile => 0,
+        .edge => 128,
+        .server => 512,
+        .dc => 4096,
+    };
 }
 
 /// Borrow an env var as a slice (no allocation; valid for the process lifetime).
@@ -406,6 +429,8 @@ pub fn load(allocator: std.mem.Allocator) !Config {
         .hnsw_m = envU32("MCP_HNSW_M", 16),
         .hnsw_ef_construction = envU32("MCP_HNSW_EF_CONSTRUCTION", 200),
         .hnsw_ef_search = envU32("MCP_HNSW_EF_SEARCH", 64),
+        .qcache_entries = envU32("MCP_QCACHE_ENTRIES", tierQCacheEntries(tier)),
+        .qcache_threshold = envF32("MCP_QCACHE_THRESHOLD", 0.97),
         .sqlite = resolveSqlite(tier),
         .dry_run = dry_run,
         .database_url = database_url,

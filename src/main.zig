@@ -5,6 +5,7 @@ const pool_mod = @import("pool.zig");
 const schema_kg = @import("kg/schema.zig");
 const schema_rag = @import("rag/schema.zig");
 const index_store = @import("index/store.zig");
+const query_cache = @import("generate/cache.zig");
 
 fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
     var conn = try pool.acquire();
@@ -88,6 +89,14 @@ pub fn main() !void {
     });
     defer idx_store.deinit();
     index_store.setGlobal(&idx_store);
+
+    // Semantic query cache (inert when MCP_QCACHE_ENTRIES=0).
+    var qcache = try query_cache.QueryCache.init(allocator, io, .{
+        .capacity = config.qcache_entries,
+        .threshold = config.qcache_threshold,
+    });
+    defer qcache.deinit();
+    query_cache.setGlobal(&qcache);
 
     if (config.server.stdio) {
         std.log.info("Running in stdio mode", .{});
