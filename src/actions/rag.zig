@@ -96,11 +96,16 @@ pub fn chunkText(_: Io, allocator: Allocator, _: *PooledConn, args: ?Value) Payl
     const text = mod.getStringParam(args, "text") orelse return mod.errPayload("Missing 'text' parameter");
     const size = getUintParam(args, "chunkSize", 200);
     const overlap = getUintParam(args, "overlap", 40);
+    const strategy = mod.getStringParam(args, "strategy") orelse "window";
 
-    const chunks = chunk.chunk(allocator, text, .{
-        .chunk_size = @intCast(size),
-        .overlap = @intCast(overlap),
-    }) catch return mod.errPayload("Chunking failed");
+    const opts = chunk.Options{ .chunk_size = @intCast(size), .overlap = @intCast(overlap) };
+    // "recursive" honours natural boundaries (paragraph→line→sentence→word);
+    // "window" is the plain sliding token window. Unknown values fall back to
+    // window so a typo degrades gracefully rather than erroring.
+    const chunks = (if (std.ascii.eqlIgnoreCase(strategy, "recursive"))
+        chunk.recursiveChunk(allocator, text, opts)
+    else
+        chunk.chunk(allocator, text, opts)) catch return mod.errPayload("Chunking failed");
 
     var aw = Writer.Allocating.init(allocator);
     defer aw.deinit();
@@ -113,7 +118,44 @@ pub fn chunkText(_: Io, allocator: Allocator, _: *PooledConn, args: ?Value) Payl
         jsonStr(w, c.content) catch return mod.errPayload("Serialization error");
         w.writeByte('}') catch return mod.errPayload("Serialization error");
     }
-    w.print("],\"count\":{d}}}", .{chunks.len}) catch return mod.errPayload("Serialization error");
+    w.print("],\"count\":{d},\"strategy\":", .{chunks.len}) catch return mod.errPayload("Serialization error");
+    jsonStr(w, strategy) catch return mod.errPayload("Serialization error");
+    w.writeByte('}') catch return mod.errPayload("Serialization error");
+    return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
+}
+
+/// Parent-child chunking: small retrieval children plus the larger parent each
+/// was cut from. The host embeds the children, retrieves on them, then expands a
+/// hit to its `parentOrdinal` for generation context.
+pub fn parentChildText(_: Io, allocator: Allocator, _: *PooledConn, args: ?Value) Payload {
+    const text = mod.getStringParam(args, "text") orelse return mod.errPayload("Missing 'text' parameter");
+    const pc = chunk.parentChildChunk(allocator, text, .{
+        .parent_size = @intCast(getUintParam(args, "parentSize", 400)),
+        .child_size = @intCast(getUintParam(args, "childSize", 100)),
+        .child_overlap = @intCast(getUintParam(args, "childOverlap", 20)),
+    }) catch return mod.errPayload("Chunking failed");
+
+    var aw = Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    const w = &aw.writer;
+    w.writeAll("{\"parents\":[") catch return mod.errPayload("Serialization error");
+    for (pc.parents, 0..) |p, i| {
+        if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
+        w.print("{{\"ordinal\":{d},\"tokenCount\":{d},\"content\":", .{ p.ordinal, p.token_count }) catch
+            return mod.errPayload("Serialization error");
+        jsonStr(w, p.content) catch return mod.errPayload("Serialization error");
+        w.writeByte('}') catch return mod.errPayload("Serialization error");
+    }
+    w.writeAll("],\"children\":[") catch return mod.errPayload("Serialization error");
+    for (pc.children, 0..) |c, i| {
+        if (i > 0) w.writeByte(',') catch return mod.errPayload("Serialization error");
+        w.print("{{\"ordinal\":{d},\"parentOrdinal\":{d},\"tokenCount\":{d},\"content\":", .{ c.ordinal, c.parent_ordinal, c.token_count }) catch
+            return mod.errPayload("Serialization error");
+        jsonStr(w, c.content) catch return mod.errPayload("Serialization error");
+        w.writeByte('}') catch return mod.errPayload("Serialization error");
+    }
+    w.print("],\"parentCount\":{d},\"childCount\":{d}}}", .{ pc.parents.len, pc.children.len }) catch
+        return mod.errPayload("Serialization error");
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
 }
 

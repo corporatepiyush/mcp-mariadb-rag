@@ -44,6 +44,7 @@ pub const registry = std.StaticStringMap(Handler).initComptime(.{
     .{ "delete_vector_embedding", kg.deleteVectorEmbedding },
     // ---- RAG engine: ingest, hybrid retrieval, document store ----
     .{ "rag_chunk_text", rag.chunkText },
+    .{ "rag_parent_child_chunk", rag.parentChildText },
     .{ "rag_ingest_document", rag.ingestDocument },
     .{ "rag_upsert_chunks", rag.upsertChunks },
     .{ "rag_search", rag.search },
