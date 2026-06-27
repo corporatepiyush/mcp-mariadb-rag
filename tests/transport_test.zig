@@ -101,7 +101,6 @@ fn makeConfig() config_mod.Config {
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
-            .http_port = 3001,
             .request_timeout_secs = 30,
             .access_mode = .unrestricted,
             .auth_token = null,

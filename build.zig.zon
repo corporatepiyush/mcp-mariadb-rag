@@ -1,7 +1,7 @@
 .{
-    .name = .mcp_kv,
+    .name = .mcp_rag,
     .version = "0.5.0",
-    .fingerprint = 0xe88a1fce1228aa32,
+    .fingerprint = 0x6b9462b7b61d8c70,
     .paths = .{
         "build.zig",
         "build.zig.zon",

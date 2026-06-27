@@ -1,4 +1,4 @@
-# MCP KV
+# MCP RAG
 
 SQLite-backed MCP server with Knowledge Graph, Vector Store, and a production
 RAG pipeline. One statically-linked binary that auto-tunes from a phone to a
@@ -28,7 +28,7 @@ Built with Zig (0.16) and the SQLite C library.
 - **Knowledge Graph**: entity/relation/observation CRUD, BFS pathfinding, search.
 - **Storage**: STRICT tables, a `(document_id, ordinal)` index, atomic multi-statement
   writes, and tier-scaled SQLite PRAGMAs (cache / mmap / synchronous / temp_store / WAL).
-- **Transport**: stdio (MCP default) and HTTP/1.1 with keep-alive.
+- **Transport**: stdio (MCP default).
 
 > Native IVF-FLAT and the remote embedding / cross-encoder rerank / LLM generation
 > stages are on the roadmap but not yet implemented.
@@ -36,7 +36,7 @@ Built with Zig (0.16) and the SQLite C library.
 ## Build
 
 ```bash
-zig build          # binary at zig-out/bin/mcp-kv
+zig build          # binary at zig-out/bin/mcp-rag
 zig build test     # unit + fuzz tests
 DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test   # + gated integration tests
 ```
@@ -44,8 +44,8 @@ DATABASE_URL="sqlite:///tmp/mcp_test.db" zig build test   # + gated integration 
 ## Run
 
 ```bash
-MCP_AUTH_TOKEN="secret" zig-out/bin/mcp-kv          # stdio (MCP default)
-MCP_DRY_RUN=1 zig-out/bin/mcp-kv                    # print the resolved config and exit
+MCP_AUTH_TOKEN="secret" zig-out/bin/mcp-rag          # stdio (MCP default)
+MCP_DRY_RUN=1 zig-out/bin/mcp-rag                    # print the resolved config and exit
 ```
 
 ## Deployment tiers
@@ -66,8 +66,7 @@ master `MCP_MEM_BUDGET_MB` (default 70% of RAM) scales the memory envelope.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | `sqlite:///tmp/mcp.db` | SQLite database path |
-| `MCP_AUTH_TOKEN` | — | Auth token for MCP requests |
-| `MCP_STDIO` / `MCP_HTTP_PORT` | `false` / `3001` | Transport |
+| `MCP_STDIO` | `false` | Transport (stdio) |
 | `MCP_TIER` | auto | `mobile`/`edge`/`server`/`dc` (overrides detection) |
 | `MCP_MEM_BUDGET_MB` | 70% RAM | Master memory budget |
 | `MCP_MIN_CONNECTIONS` / `MCP_MAX_CONNECTIONS` | tier | Pool sizing |
@@ -80,7 +79,7 @@ master `MCP_MEM_BUDGET_MB` (default 70% of RAM) scales the memory envelope.
 | `MCP_SQLITE_SYNC` / `_TEMP` / `_WAL_CKPT` / `_BUSY_MS` | tier | SQLite durability/IO |
 | `MCP_DRY_RUN` | `false` | Print resolved config and exit |
 
-Run `MCP_DRY_RUN=1 zig-out/bin/mcp-kv` to see the fully-resolved knob table for any
+Run `MCP_DRY_RUN=1 zig-out/bin/mcp-rag` to see the fully-resolved knob table for any
 tier/override combination.
 
 ## Selected RAG tools
@@ -100,9 +99,9 @@ Embeddings are caller-supplied (the host computes them with its embedder of choi
 ```json
 {
   "mcpServers": {
-    "mcp-kv": {
-      "command": "/path/to/zig-out/bin/mcp-kv",
-      "env": { "DATABASE_URL": "sqlite:///tmp/mcp.db", "MCP_AUTH_TOKEN": "secret" }
+    "mcp-rag": {
+      "command": "/path/to/zig-out/bin/mcp-rag",
+      "env": { "DATABASE_URL": "sqlite:///tmp/mcp.db" }
     }
   }
 }

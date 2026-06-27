@@ -197,7 +197,6 @@ pub const SqliteTuning = struct {
 pub const ServerConfig = struct {
     host: []const u8,
     port: u16,
-    http_port: u16,
     request_timeout_secs: u64,
     access_mode: AccessMode,
     auth_token: ?[]const u8,
@@ -410,7 +409,7 @@ fn resolveSqlite(tier: Tier) SqliteTuning {
 }
 
 /// Tier-scaled default for the pool's max connection count (PLAN.md §5).
-fn tierPoolMax(tier: Tier, cores: usize) u32 {
+pub fn tierPoolMax(tier: Tier, cores: usize) u32 {
     return switch (tier) {
         .mobile => 2,
         .edge => @intCast(@max(2, cores * 2)),
@@ -423,7 +422,6 @@ pub fn load(allocator: std.mem.Allocator) !Config {
     const database_url = getEnv(allocator, "DATABASE_URL") orelse try allocator.dupe(u8, "sqlite:///tmp/mcp.db");
     const host = getEnv(allocator, "MCP_HOST") orelse try allocator.dupe(u8, "127.0.0.1");
     const port = envU16("MCP_PORT", 3000);
-    const http_port = envU16("MCP_HTTP_PORT", 3001);
     const log_level = getEnv(allocator, "MCP_LOG_LEVEL") orelse try allocator.dupe(u8, "info");
     const enable_metrics = envBool("MCP_ENABLE_METRICS");
     const metrics_port = envU16("MCP_METRICS_PORT", 9090);
@@ -478,7 +476,6 @@ pub fn load(allocator: std.mem.Allocator) !Config {
         .server = .{
             .host = host,
             .port = port,
-            .http_port = http_port,
             .request_timeout_secs = 30,
             .access_mode = access_mode,
             .auth_token = auth_token,
@@ -496,94 +493,3 @@ pub fn load(allocator: std.mem.Allocator) !Config {
         },
     };
 }
-
-// ── Tests ─────────────────────────────────────────────────────────────
-
-const testing = std.testing;
-
-test "Tier.detect spans phone to datacenter by RAM" {
-    try testing.expectEqual(Tier.mobile, Tier.detect(512 * 1024 * 1024, 1));
-    try testing.expectEqual(Tier.edge, Tier.detect(4 * (1 << 30), 2));
-    try testing.expectEqual(Tier.server, Tier.detect(32 * (1 << 30), 16));
-    try testing.expectEqual(Tier.dc, Tier.detect(256 * (1 << 30), 64));
-    // A small-RAM but many-core box is bumped off mobile.
-    try testing.expectEqual(Tier.edge, Tier.detect(512 * 1024 * 1024, 8));
-}
-
-test "Tier.parse round-trips, rejects junk" {
-    try testing.expectEqual(Tier.server, Tier.parse("SERVER").?);
-    try testing.expectEqual(Tier.dc, Tier.parse("dc").?);
-    try testing.expect(Tier.parse("nonsense") == null);
-    try testing.expect(Tier.parse(null) == null);
-}
-
-test "SqliteTuning.forTier scales the IO knobs monotonically" {
-    const m = SqliteTuning.forTier(.mobile);
-    const s = SqliteTuning.forTier(.server);
-    const d = SqliteTuning.forTier(.dc);
-    try testing.expect(m.cache_kib < s.cache_kib and s.cache_kib < d.cache_kib);
-    try testing.expect(m.mmap_bytes == 0 and s.mmap_bytes > 0);
-    try testing.expect(d.mmap_bytes > s.mmap_bytes);
-    // mobile favours durability; bigger boxes relax to NORMAL under WAL.
-    try testing.expectEqual(Synchronous.full, m.synchronous);
-    try testing.expectEqual(Synchronous.normal, s.synchronous);
-    try testing.expectEqualStrings("MEMORY", d.temp_store.sql());
-}
-
-test "tierPoolMax follows the pool sizing table" {
-    try testing.expectEqual(@as(u32, 2), tierPoolMax(.mobile, 8));
-    try testing.expectEqual(@as(u32, 16), tierPoolMax(.edge, 8));
-    try testing.expectEqual(@as(u32, 64), tierPoolMax(.server, 8));
-    try testing.expectEqual(@as(u32, 128), tierPoolMax(.dc, 8));
-}
-
-test "HostInfo.detect returns sane, nonzero facts" {
-    const h = HostInfo.detect();
-    try testing.expect(h.cores >= 1);
-    try testing.expect(h.ram_bytes >= 1 << 30); // at least the 1 GiB fallback
-}
-
-test "componentUrl inserts the component before the extension" {
-    const a = testing.allocator;
-    const cases = .{
-        .{ "sqlite:///tmp/mcp.db", "kg", "sqlite:///tmp/mcp.kg.db" },
-        .{ "sqlite:///tmp/mcp.db", "rag", "sqlite:///tmp/mcp.rag.db" },
-        .{ "sqlite://./data.db", "kg", "sqlite://./data.kg.db" },
-        // No extension: append the component.
-        .{ "sqlite:///var/store", "rag", "sqlite:///var/store.rag" },
-        // Dots in a directory but not the filename: split on the filename dot.
-        .{ "sqlite:///a.b/mcp.db", "kg", "sqlite:///a.b/mcp.kg.db" },
-        // In-memory and non-sqlite are returned unchanged.
-        .{ "sqlite://", "kg", "sqlite://" },
-        .{ "postgres://x/y", "rag", "postgres://x/y" },
-    };
-    inline for (cases) |case| {
-        const got = try componentUrl(a, case[0], case[1]);
-        defer a.free(got);
-        try testing.expectEqualStrings(case[2], got);
-    }
-}
-
-test "componentUrl: a dotted directory with an extensionless file appends" {
-    const a = testing.allocator;
-    // last '.' is before the last '/', so it's part of the directory → append.
-    const got = try componentUrl(a, "sqlite:///a.b/store", "kg");
-    defer a.free(got);
-    try testing.expectEqualStrings("sqlite:///a.b/store.kg", got);
-}
-
-test "sqliteFor gives RAG a larger page size, KG the base" {
-    var cfg: Config = .{
-        .database_url = "",
-        .server = undefined,
-        .pool = undefined,
-        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
-        .sqlite = SqliteTuning.forTier(.server), // page_size 8192
-    };
-    const rag = cfg.sqliteFor(.rag);
-    const kg = cfg.sqliteFor(.kg);
-    try testing.expectEqual(@as(u32, 16384), rag.page_size); // packs embedding BLOBs
-    try testing.expectEqual(cfg.sqlite.page_size, kg.page_size);
-    try testing.expect(rag.page_size > kg.page_size);
-}
-

@@ -1,9 +1,9 @@
 const std = @import("std");
-const pool = @import("../pool.zig");
+pub const pool = @import("../pool.zig");
 const json = @import("../json.zig");
-const kg = @import("kg.zig");
-const rag = @import("rag.zig");
-const doc = @import("doc.zig");
+pub const kg = @import("kg.zig");
+pub const rag = @import("rag.zig");
+pub const doc = @import("doc.zig");
 
 const Value = std.json.Value;
 const Writer = std.Io.Writer;
@@ -140,33 +140,4 @@ pub fn getArrayParam(args: ?Value, name: []const u8) ?std.json.Array {
     if (a != .object) return null;
     const v = a.object.get(name) orelse return null;
     return if (v == .array) v.array else null;
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────
-
-const testing = std.testing;
-
-test "componentFor routes RAG/doc tools to rag, KG tools to kg" {
-    // Every registered RAG/doc tool must route to the rag database.
-    inline for (.{
-        "rag_search", "rag_vector_search", "rag_ingest_document", "rag_chunk_text",
-        "rag_parent_child_chunk", "rag_stats", "rag_get_document", "rag_delete_document",
-        "doc_detect_format", "doc_extract_text", "doc_extract_and_chunk",
-    }) |name| try testing.expectEqual(pool.Component.rag, componentFor(name));
-
-    // Knowledge-graph tools route to the kg database.
-    inline for (.{
-        "vector_search", "bfs_path", "create_entities", "create_relations",
-        "search_nodes", "get_graph_statistics", "upsert_vector_embedding",
-    }) |name| try testing.expectEqual(pool.Component.kg, componentFor(name));
-
-    // Every tool in the registry classifies without panicking.
-    for (registry.keys()) |name| _ = componentFor(name);
-}
-
-test "componentFor: edge cases default to kg" {
-    try testing.expectEqual(pool.Component.kg, componentFor(""));
-    try testing.expectEqual(pool.Component.kg, componentFor("unknown_tool"));
-    try testing.expectEqual(pool.Component.kg, componentFor("rag")); // no underscore
-    try testing.expectEqual(pool.Component.rag, componentFor("rag_")); // prefix match
 }

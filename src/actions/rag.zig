@@ -12,9 +12,9 @@
 
 const std = @import("std");
 const pool = @import("../pool.zig");
-const json = @import("../json.zig");
+pub const json = @import("../json.zig");
 const mod = @import("mod.zig");
-const schema = @import("../rag/schema.zig");
+pub const schema = @import("../rag/schema.zig");
 const query = @import("../rag/query.zig");
 const chunk = @import("../rag/chunk.zig");
 const fusion = @import("../rag/fusion.zig");
@@ -33,13 +33,13 @@ const Writer = std.Io.Writer;
 // Compile-time default; the *active* dimensionality is `schema.embeddingDims()`,
 // resolved at startup from MCP_EMBED_DIMS. Used only where a comptime value is
 // needed (e.g. the dimension-enforcement unit test).
-const dims = schema.embedding_dims;
+pub const dims = schema.embedding_dims;
 
 // ── Param helpers ─────────────────────────────────────────────────────
 
 /// Read an unsigned integer param accepting either a JSON number or a numeric
 /// string (MCP clients send both forms).
-fn getUintParam(args: ?Value, name: []const u8, default: u64) u64 {
+pub fn getUintParam(args: ?Value, name: []const u8, default: u64) u64 {
     const a = args orelse return default;
     if (a != .object) return default;
     const v = a.object.get(name) orelse return default;
@@ -67,7 +67,7 @@ const EmbedError = error{ BadDim, NotNumber, OutOfMemory };
 /// Parse a JSON array into an owned embedding of exactly `schema.embeddingDims()`
 /// components. Every vector in a corpus must share that width, so a wrong length
 /// is a hard error.
-fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
+pub fn embeddingExact(allocator: Allocator, val: Value) EmbedError![]f32 {
     if (val != .array) return error.NotNumber;
     const arr = val.array;
     const want = schema.embeddingDims();
@@ -167,7 +167,7 @@ fn dimErr(allocator: Allocator, what: []const u8) Payload {
 }
 
 /// Interpret raw f32 blob bytes as a float slice.
-fn embFromBlob(allocator: Allocator, blob: []const u8) ![]f32 {
+pub fn embFromBlob(allocator: Allocator, blob: []const u8) ![]f32 {
     const n = blob.len / @sizeOf(f32);
     if (n == 0 or blob.len % @sizeOf(f32) != 0) return error.InvalidBlob;
     const out = try allocator.alloc(f32, n);
@@ -766,108 +766,4 @@ pub fn stats(_: Io, allocator: Allocator, conn: *PooledConn, _: ?Value) Payload 
     aw.writer.print("{{\"document_count\":{s},\"chunk_count\":{s}}}", .{ d_count, c_count }) catch
         return mod.errPayload("Serialization error");
     return .{ .text = aw.toOwnedSlice() catch return mod.errPayload("Allocation error"), .is_error = false };
-}
-
-// ── Tests (DB-free helper coverage) ───────────────────────────────────
-
-const testing = std.testing;
-
-test "embFromBlob round-trips an f32 array" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const orig = [_]f32{ 1, 2.5, -3 };
-    const blob = std.mem.sliceAsBytes(&orig);
-    const v = try embFromBlob(arena.allocator(), blob);
-    try testing.expectEqual(@as(usize, 3), v.len);
-    try testing.expectEqual(@as(f32, 1), v[0]);
-    try testing.expectEqual(@as(f32, 2.5), v[1]);
-    try testing.expectEqual(@as(f32, -3), v[2]);
-}
-
-test "embFromBlob handles empty" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    try testing.expectError(error.InvalidBlob, embFromBlob(arena.allocator(), ""));
-    try testing.expectError(error.InvalidBlob, embFromBlob(arena.allocator(), &[_]u8{ 0, 1, 2 }));
-}
-
-/// Build a Value by parsing JSON text (avoids depending on the std.json
-/// map/array constructor signatures, which differ across Zig versions).
-fn parseValue(a: Allocator, src: []const u8) Value {
-    const parsed = std.json.parseFromSlice(Value, a, src, .{}) catch unreachable;
-    return parsed.value;
-}
-
-/// A JSON array literal of `n` zeros, optionally with a leading non-number.
-fn zerosArray(a: Allocator, n: usize, leading_string: bool) []const u8 {
-    var aw = Writer.Allocating.init(a);
-    const w = &aw.writer;
-    w.writeByte('[') catch unreachable;
-    for (0..n) |i| {
-        if (i > 0) w.writeByte(',') catch unreachable;
-        if (i == 0 and leading_string) {
-            w.writeAll("\"x\"") catch unreachable;
-        } else {
-            w.writeByte('0') catch unreachable;
-        }
-    }
-    w.writeByte(']') catch unreachable;
-    return aw.toOwnedSlice() catch unreachable;
-}
-
-test "embeddingExact enforces dimensionality" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    try testing.expectError(error.BadDim, embeddingExact(a, parseValue(a, "[1.0]")));
-    try testing.expectError(error.NotNumber, embeddingExact(a, parseValue(a, zerosArray(a, dims, true))));
-
-    const ok = try embeddingExact(a, parseValue(a, zerosArray(a, dims, false)));
-    try testing.expectEqual(@as(usize, dims), ok.len);
-}
-
-test "embeddingExact honours the runtime MCP_EMBED_DIMS width" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    // Switch the active width to 1024 (e.g. a Voyage embedder), then restore so
-    // the global doesn't leak into other tests.
-    const saved = schema.embeddingDims();
-    defer schema.setEmbeddingDims(saved);
-    schema.setEmbeddingDims(1024);
-
-    // The old 384-wide vector is now rejected; a 1024-wide one is accepted.
-    try testing.expectError(error.BadDim, embeddingExact(a, parseValue(a, zerosArray(a, 384, false))));
-    const ok = try embeddingExact(a, parseValue(a, zerosArray(a, 1024, false)));
-    try testing.expectEqual(@as(usize, 1024), ok.len);
-
-    // setEmbeddingDims(0) is ignored — validation can't be disabled by a typo.
-    schema.setEmbeddingDims(0);
-    try testing.expectEqual(@as(usize, 1024), schema.embeddingDims());
-}
-
-test "getUintParam accepts number and string forms" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-    const args = parseValue(a, "{\"n\":7,\"s\":\"9\"}");
-    try testing.expectEqual(@as(u64, 7), getUintParam(args, "n", 1));
-    try testing.expectEqual(@as(u64, 9), getUintParam(args, "s", 1));
-    try testing.expectEqual(@as(u64, 3), getUintParam(args, "missing", 3));
-}
-
-test "fuzz: embFromBlob never panics on random bytes" {
-    var prng = std.Random.DefaultPrng.init(0xEEEE);
-    const rnd = prng.random();
-    var buf: [128]u8 = undefined;
-
-    for (0..500) |_| {
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const len = rnd.intRangeLessThan(usize, 0, buf.len);
-        for (buf[0..len]) |*b| b.* = rnd.int(u8);
-        _ = embFromBlob(arena.allocator(), buf[0..len]) catch {};
-    }
 }

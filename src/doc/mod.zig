@@ -13,14 +13,14 @@ pub const detect = @import("detect.zig");
 pub const Format = detect.Format;
 
 const text_mod = @import("text.zig");
-const csv_mod = @import("csv/csv.zig");
-const json_mod = @import("json/json.zig");
+const csv_mod = @import("csv.zig");
+const json_mod = @import("json.zig");
 const xml_mod = @import("xml.zig");
-const docx_mod = @import("docx/docx.zig");
-const pdf_mod = @import("pdf/pdf.zig");
-const parquet_mod = @import("parquet/parquet.zig");
-const iceberg_mod = @import("iceberg/iceberg.zig");
-const legacy_doc_mod = @import("legacy_doc/doc.zig");
+const docx_mod = @import("docx.zig");
+const pdf_mod = @import("pdf.zig");
+const parquet_mod = @import("parquet.zig");
+const iceberg_mod = @import("iceberg.zig");
+const legacy_doc_mod = @import("doc.zig");
 const inflate = @import("inflate.zig");
 
 pub const pool = @import("pool.zig");
@@ -140,48 +140,4 @@ pub fn errorMessage(e: Error, fmt: Format) []const u8 {
         error.Corrupt => "Document is corrupt or malformed",
         error.NotFound => "Expected container member not found",
     };
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────
-const testing = std.testing;
-
-test "extract dispatches by detected format" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    const a = arena.allocator();
-
-    const csv = try extract(a, "a,b\n1,2\n", null);
-    try testing.expectEqual(Format.csv, csv.format);
-    try testing.expectEqualStrings("a b\n1 2\n", csv.text);
-
-    const js = try extract(a, "{\"k\":\"v\"}", null);
-    try testing.expectEqual(Format.json, js.format);
-    try testing.expectEqualStrings("k v", js.text);
-
-    const txt = try extract(a, "plain prose", null);
-    try testing.expectEqual(Format.text, txt.format);
-}
-
-test "extract reports pending for parquet" {
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var buf: [17]u8 = undefined;
-    @memcpy(buf[0..4], "PAR1");
-    @memset(buf[4..9], 'M');
-    std.mem.writeInt(u32, buf[9..13], 5, .little);
-    @memcpy(buf[13..17], "PAR1");
-    try testing.expectError(error.Pending, extract(arena.allocator(), &buf, null));
-}
-
-test "fuzz: extract never panics on random bytes" {
-    var prng = std.Random.DefaultPrng.init(0xE47AC7);
-    const rnd = prng.random();
-    var buf: [512]u8 = undefined;
-    for (0..2000) |_| {
-        var arena = std.heap.ArenaAllocator.init(testing.allocator);
-        defer arena.deinit();
-        const n = rnd.intRangeLessThan(usize, 0, buf.len);
-        for (buf[0..n]) |*b| b.* = rnd.int(u8);
-        _ = extract(arena.allocator(), buf[0..n], null) catch {};
-    }
 }

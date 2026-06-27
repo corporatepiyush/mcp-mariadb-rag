@@ -24,7 +24,6 @@ fn createTestConfig(allocator: std.mem.Allocator) config_mod.Config {
         .server = .{
             .host = allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
-            .http_port = 3001,
             .request_timeout_secs = 30,
             .access_mode = .unrestricted,
             .auth_token = null,
@@ -171,7 +170,7 @@ test "handleRequest: initialize with no params uses latest version" {
     const resp = handle(testing.allocator, "{\"method\":\"initialize\",\"id\":1}", &pool, &cfg, io) orelse return error.TestFailed;
     defer testing.allocator.free(resp);
     try testing.expect(contains(resp, "2025-11-25"));
-    try testing.expect(contains(resp, "mcp-kv"));
+    try testing.expect(contains(resp, "mcp-rag"));
     try testing.expect(contains(resp, "\"id\":1"));
 }
 
@@ -325,7 +324,6 @@ test "handleRequest: restricted mode blocks write tool" {
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
-            .http_port = 3001,
             .request_timeout_secs = 30,
             .access_mode = .restricted,
             .auth_token = null,
@@ -363,7 +361,6 @@ test "handleRequest: restricted mode allows read tool" {
         .server = .{
             .host = testing.allocator.dupe(u8, "127.0.0.1") catch unreachable,
             .port = 3000,
-            .http_port = 3001,
             .request_timeout_secs = 30,
             .access_mode = .restricted,
             .auth_token = null,

@@ -1,5 +1,5 @@
 //! End-to-end tests that drive the **actual built binary** over stdio, exactly
-//! as an MCP host would: spawn `zig-out/bin/mcp-kv`, write newline-delimited
+//! as an MCP host would: spawn `zig-out/bin/mcp-rag`, write newline-delimited
 //! JSON-RPC requests, close stdin, and assert on the responses.
 //!
 //! These replace the throwaway shell/Python smoke checks — they are permanent,
@@ -16,7 +16,7 @@ const Value = std.json.Value;
 
 extern "c" fn getenv(name: [*:0]const u8) ?[*:0]const u8;
 
-const bin_path = "zig-out/bin/mcp-kv";
+const bin_path = "zig-out/bin/mcp-rag";
 
 /// e2e tests spawn the real binary; gated on `MCP_E2E=1` (and the binary being
 /// built) so a plain `zig build test` stays fast and hermetic.
@@ -31,8 +31,7 @@ fn binExists(io: Io) bool {
 ///
 /// The child env is set **explicitly** via `environ_map`: Zig 0.16 spawns from
 /// the environment snapshot captured at startup, so a runtime `setenv` would not
-/// reach the child — without `MCP_STDIO=1` the binary would start the HTTP
-/// server and block on accept. The sqlite dylib is found via the rpath baked
+/// reach the child. The sqlite dylib is found via the rpath baked
 /// into the binary, so a minimal env suffices.
 fn drive(allocator: std.mem.Allocator, io: Io, db_path: []const u8, requests: []const u8) ![]u8 {
     var env = std.process.Environ.Map.init(allocator);

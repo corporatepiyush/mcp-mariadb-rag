@@ -37,7 +37,7 @@ pub fn main() !void {
     var config = try config_mod.load(allocator);
     defer config.deinit(allocator);
 
-    std.log.info("Starting MCP KV Server", .{});
+    std.log.info("Starting MCP RAG Server", .{});
 
     // Capacity-planning preflight: `MCP_DRY_RUN=1` resolves the full knob table
     // and exits without serving.
@@ -48,10 +48,6 @@ pub fn main() !void {
     if (config.dry_run) {
         std.log.info("dry run: exiting without serving (MCP_DRY_RUN)", .{});
         return;
-    }
-
-    if (config.server.auth_token == null and !config.server.stdio) {
-        std.log.warn("No auth token configured. Set MCP_AUTH_TOKEN for security.", .{});
     }
 
     // Per-component database files: kg + rag get separate SQLite files (or
@@ -87,7 +83,7 @@ pub fn main() !void {
     };
 
     // Publish the ANN index cache (no-op for queries when MCP_INDEX_TYPE=flat).
-    var idx_store = index_store.Store.init(allocator, io, .{
+    var idx_store = index_store.Store.init(io, allocator, .{
         .enabled = config.index_type == .hnsw,
         .metric = if (config.index_cosine) .cosine else .l2,
         .m = config.hnsw_m,
@@ -98,20 +94,15 @@ pub fn main() !void {
     index_store.setGlobal(&idx_store);
 
     // Semantic query cache (inert when MCP_QCACHE_ENTRIES=0).
-    var qcache = try query_cache.QueryCache.init(allocator, io, .{
+    var qcache = try query_cache.QueryCache.init(io, allocator, .{
         .capacity = config.qcache_entries,
         .threshold = config.qcache_threshold,
     });
     defer qcache.deinit();
     query_cache.setGlobal(&qcache);
 
-    if (config.server.stdio) {
-        std.log.info("Running in stdio mode", .{});
-        transport.runStdio(io, allocator, &router, &config);
-    } else {
-        std.log.info("Starting HTTP server on port {d}", .{config.server.http_port});
-        transport.runHttp(io, allocator, &router, &config);
-    }
+    std.log.info("Running in stdio mode", .{});
+    transport.runStdio(io, allocator, &router, &config);
 
     std.log.info("Server shutdown complete", .{});
 }
