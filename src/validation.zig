@@ -186,3 +186,85 @@ test "validateSql rejects stacked statements" {
     try validateSql("SELECT 1 -- ; not a statement", "SELECT");
     try validateSql("SELECT 1 /* ; */ ", "SELECT");
 }
+
+// ---- property/fuzz tests for the injection-defense invariants ----------------
+// These are the security-critical functions: any input, no matter how hostile,
+// must produce output that cannot break out of its quoting context.
+
+/// The core literal-escaping invariant: in the output every `'` and every `\`
+/// occurs only as a doubled pair, and there is no NUL — so wrapping the output in
+/// single quotes can never terminate the literal early. Returns false on any
+/// lone quote/backslash, which would be an injection.
+fn literalIsUnbreakable(out: []const u8) bool {
+    var i: usize = 0;
+    while (i < out.len) {
+        switch (out[i]) {
+            '\'' => {
+                if (i + 1 >= out.len or out[i + 1] != '\'') return false;
+                i += 2;
+            },
+            '\\' => {
+                if (i + 1 >= out.len or out[i + 1] != '\\') return false;
+                i += 2;
+            },
+            0 => return false,
+            else => i += 1,
+        }
+    }
+    return true;
+}
+
+test "fuzz: writeEscapedLiteral output can never break out of a string literal" {
+    var prng = std.Random.DefaultPrng.init(0x5A1E_9000);
+    const rnd = prng.random();
+    var in_buf: [128]u8 = undefined;
+    var out_buf: [512]u8 = undefined; // worst case 2x + slack
+
+    for (0..5000) |_| {
+        const len = rnd.intRangeAtMost(usize, 0, in_buf.len);
+        for (in_buf[0..len]) |*b| b.* = rnd.int(u8); // every byte incl. ' \ NUL
+        var w = Writer.fixed(&out_buf);
+        try writeEscapedLiteral(&w, in_buf[0..len]);
+        try testing.expect(literalIsUnbreakable(w.buffered()));
+    }
+}
+
+test "fuzz: writeQuotedIdent is backtick-wrapped with every inner backtick doubled" {
+    var prng = std.Random.DefaultPrng.init(0xB17C_0DE);
+    const rnd = prng.random();
+    var in_buf: [64]u8 = undefined;
+    var out_buf: [256]u8 = undefined;
+
+    for (0..5000) |_| {
+        const len = rnd.intRangeAtMost(usize, 0, in_buf.len);
+        for (in_buf[0..len]) |*b| b.* = rnd.int(u8);
+        var w = Writer.fixed(&out_buf);
+        try writeQuotedIdent(&w, in_buf[0..len]);
+        const out = w.buffered();
+        try testing.expect(out.len >= 2 and out[0] == '`' and out[out.len - 1] == '`');
+        // Every backtick in the body (excluding the wrappers) must be doubled.
+        const body = out[1 .. out.len - 1];
+        var i: usize = 0;
+        while (i < body.len) : (i += 1) {
+            if (body[i] == '`') {
+                try testing.expect(i + 1 < body.len and body[i + 1] == '`');
+                i += 1;
+            }
+        }
+    }
+}
+
+test "fuzz: validateSql never panics or hangs on random bytes" {
+    var prng = std.Random.DefaultPrng.init(0x5A1_DA7A);
+    const rnd = prng.random();
+    var buf: [256]u8 = undefined;
+    // Alphabet rich in the parser's special bytes to exercise the quote/comment
+    // state machine and skipQuoted's bounds.
+    const alphabet = "SELECT 'abc\"`-/*;\n\\";
+
+    for (0..5000) |_| {
+        const len = rnd.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..len]) |*b| b.* = alphabet[rnd.uintLessThan(usize, alphabet.len)];
+        validateSql(buf[0..len], "SELECT") catch {}; // any error is fine; must return
+    }
+}

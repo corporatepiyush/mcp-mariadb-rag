@@ -186,6 +186,28 @@ fn renderToBuf(buf: []u8, comptime f: anytype, args: anytype) ![]u8 {
     return w.buffered();
 }
 
+test "fuzz: writeQuoted output is always valid JSON that round-trips" {
+    var prng = std.Random.DefaultPrng.init(0x350_15ED);
+    const rnd = prng.random();
+    var in_buf: [128]u8 = undefined;
+    var out_buf: [1024]u8 = undefined; // \uXXXX worst case 6x
+
+    for (0..5000) |_| {
+        const len = rnd.intRangeAtMost(usize, 0, in_buf.len);
+        // Single-byte codepoints (0x00–0x7F) are always valid UTF-8 and exercise
+        // every escape branch (quote, backslash, \n\r\t\b\f, \u00XX, passthrough).
+        for (in_buf[0..len]) |*b| b.* = rnd.uintLessThan(u8, 0x80);
+
+        var w = Writer.fixed(&out_buf);
+        try writeQuoted(&w, in_buf[0..len]);
+        const out = w.buffered();
+
+        const parsed = try std.json.parseFromSlice([]const u8, testing.allocator, out, .{});
+        defer parsed.deinit();
+        try testing.expectEqualStrings(in_buf[0..len], parsed.value);
+    }
+}
+
 test "escaping" {
     var buf: [256]u8 = undefined;
     try testing.expectEqualStrings(

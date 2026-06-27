@@ -543,3 +543,47 @@ test "HostInfo.detect returns sane, nonzero facts" {
     try testing.expect(h.ram_bytes >= 1 << 30); // at least the 1 GiB fallback
 }
 
+test "componentUrl inserts the component before the extension" {
+    const a = testing.allocator;
+    const cases = .{
+        .{ "sqlite:///tmp/mcp.db", "kg", "sqlite:///tmp/mcp.kg.db" },
+        .{ "sqlite:///tmp/mcp.db", "rag", "sqlite:///tmp/mcp.rag.db" },
+        .{ "sqlite://./data.db", "kg", "sqlite://./data.kg.db" },
+        // No extension: append the component.
+        .{ "sqlite:///var/store", "rag", "sqlite:///var/store.rag" },
+        // Dots in a directory but not the filename: split on the filename dot.
+        .{ "sqlite:///a.b/mcp.db", "kg", "sqlite:///a.b/mcp.kg.db" },
+        // In-memory and non-sqlite are returned unchanged.
+        .{ "sqlite://", "kg", "sqlite://" },
+        .{ "postgres://x/y", "rag", "postgres://x/y" },
+    };
+    inline for (cases) |case| {
+        const got = try componentUrl(a, case[0], case[1]);
+        defer a.free(got);
+        try testing.expectEqualStrings(case[2], got);
+    }
+}
+
+test "componentUrl: a dotted directory with an extensionless file appends" {
+    const a = testing.allocator;
+    // last '.' is before the last '/', so it's part of the directory → append.
+    const got = try componentUrl(a, "sqlite:///a.b/store", "kg");
+    defer a.free(got);
+    try testing.expectEqualStrings("sqlite:///a.b/store.kg", got);
+}
+
+test "sqliteFor gives RAG a larger page size, KG the base" {
+    var cfg: Config = .{
+        .database_url = "",
+        .server = undefined,
+        .pool = undefined,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+        .sqlite = SqliteTuning.forTier(.server), // page_size 8192
+    };
+    const rag = cfg.sqliteFor(.rag);
+    const kg = cfg.sqliteFor(.kg);
+    try testing.expectEqual(@as(u32, 16384), rag.page_size); // packs embedding BLOBs
+    try testing.expectEqual(cfg.sqlite.page_size, kg.page_size);
+    try testing.expect(rag.page_size > kg.page_size);
+}
+
