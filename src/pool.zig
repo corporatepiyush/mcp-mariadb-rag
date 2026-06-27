@@ -349,9 +349,57 @@ pub const ConnectionPool = struct {
     }
 };
 
+// ── Component router ───────────────────────────────────────────────────
+//
+// Each component gets its own SQLite file, pool, WAL, and PRAGMA profile, so a
+// write on one never holds a lock the other needs. WAL already gives each file
+// concurrent readers + one writer; separating files removes *cross-component*
+// write serialization entirely (the KG writer and the RAG writer no longer
+// contend for a single database's write lock).
+
+pub const Component = enum { kg, rag };
+
+/// Holds the per-component pools and dispatches acquisition by component.
+pub const Router = struct {
+    kg: ConnectionPool,
+    rag: ConnectionPool,
+
+    pub fn acquire(self: *Router, component: Component) PoolError!PooledConnection {
+        return switch (component) {
+            .kg => self.kg.acquire(),
+            .rag => self.rag.acquire(),
+        };
+    }
+
+    pub fn close(self: *Router) void {
+        self.kg.close();
+        self.rag.close();
+    }
+};
+
 // ── Tests ──────────────────────────────────────────────────────────────
 
 const testing = std.testing;
+
+test "Router dispatches to the right component pool" {
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    const opts = Options{ .min_size = 1, .max_size = 2, .tls = .{ .enforce = false, .verify = false, .ca_path = null } };
+
+    var router = Router{
+        .kg = try ConnectionPool.init(io, testing.allocator, "sqlite://", opts),
+        .rag = try ConnectionPool.init(io, testing.allocator, "sqlite://", opts),
+    };
+    defer router.close();
+
+    var kg_conn = try router.acquire(.kg);
+    defer kg_conn.deinit();
+    _ = try kg_conn.execute("CREATE TABLE k(x INTEGER)");
+    var rag_conn = try router.acquire(.rag);
+    defer rag_conn.deinit();
+    _ = try rag_conn.execute("SELECT 1");
+}
 
 test "DatabaseConn init/query in-memory" {
     var conn = try DatabaseConn.init("sqlite://", 1, .{ .enforce = false, .verify = false, .ca_path = null });

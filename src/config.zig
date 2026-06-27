@@ -65,6 +65,27 @@ pub const IndexType = enum {
     }
 };
 
+/// Database component — each gets its own file, pool, and PRAGMA profile.
+pub const DbKind = enum { kg, rag };
+
+/// Derive a per-component database URL from the base. A file URL gains a
+/// `.<component>` segment before its extension (`…/mcp.db` → `…/mcp.rag.db`); an
+/// in-memory URL (`sqlite://` with no path) is returned unchanged, so both
+/// components share one in-memory database (the no-blocking win only applies to
+/// real files anyway).
+pub fn componentUrl(allocator: std.mem.Allocator, base: []const u8, comp: []const u8) ![]u8 {
+    const prefix = "sqlite://";
+    if (!std.mem.startsWith(u8, base, prefix)) return allocator.dupe(u8, base);
+    const path = base[prefix.len..];
+    if (path.len == 0 or std.mem.eql(u8, path, "/")) return allocator.dupe(u8, base); // in-memory
+    const slash = std.mem.lastIndexOfScalar(u8, path, '/');
+    if (std.mem.lastIndexOfScalar(u8, path, '.')) |dot| {
+        if (slash == null or dot > slash.?)
+            return std.fmt.allocPrint(allocator, "{s}{s}.{s}{s}", .{ prefix, path[0..dot], comp, path[dot..] });
+    }
+    return std.fmt.allocPrint(allocator, "{s}{s}.{s}", .{ prefix, path, comp });
+}
+
 /// Detected host facts that seed every default. Cheap to gather; logged once.
 pub const HostInfo = struct {
     ram_bytes: u64,
@@ -239,6 +260,21 @@ pub const Config = struct {
         allocator.free(self.server.log_level);
         if (self.server.auth_token) |t| allocator.free(t);
         if (self.tls.ca_path) |p| allocator.free(p);
+    }
+
+    /// Per-component SQLite tuning. The RAG database stores large embedding
+    /// BLOBs and is scan-heavy, so it uses a larger page size (more vector bytes
+    /// packed inline, fewer overflow pages — `page_size` only applies when the
+    /// file is first created, which is exactly when these component files are).
+    /// The KG database is small-row, point-lookup work and keeps the tier page
+    /// size.
+    pub fn sqliteFor(self: *const Config, kind: DbKind) SqliteTuning {
+        var t = self.sqlite;
+        switch (kind) {
+            .rag => t.page_size = @max(t.page_size, 16384),
+            .kg => {},
+        }
+        return t;
     }
 
     /// Emit the fully-resolved knob table so an operator can see exactly what the

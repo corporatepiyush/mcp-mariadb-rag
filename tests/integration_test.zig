@@ -106,12 +106,16 @@ test "integration: handleRequest initialize roundtrip" {
     defer threaded.deinit();
     const io = threaded.io();
 
-    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+    const pool_opts = pool_mod.Options{
         .min_size = 1,
         .max_size = 2,
         .tls = .{ .enforce = false, .verify = false, .ca_path = null },
-    });
-    defer pool.close();
+    };
+    var router = pool_mod.Router{
+        .kg = try pool_mod.ConnectionPool.init(io, testing.allocator, url, pool_opts),
+        .rag = try pool_mod.ConnectionPool.init(io, testing.allocator, url, pool_opts),
+    };
+    defer router.close();
 
     var cfg = config_mod.Config{
         .database_url = testing.allocator.dupe(u8, url) catch unreachable,
@@ -150,7 +154,7 @@ test "integration: handleRequest initialize roundtrip" {
 
     const resp = server.handleRequest(io, arena.allocator(),
         "{\"method\":\"tools/call\",\"params\":{\"name\":\"list_tables\"},\"id\":1}",
-        &pool, &cfg
+        &router, &cfg
     ) orelse return error.TestFailed;
 
     // With a real DB, this should succeed (not return Pool error)

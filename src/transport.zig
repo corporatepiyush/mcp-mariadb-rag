@@ -23,7 +23,7 @@ const MAX_INFLIGHT = 64;
 
 // ---- stdio transport: newline-delimited JSON ----------------------------
 
-pub fn runStdio(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *const config_mod.Config) void {
+pub fn runStdio(io: Io, gpa: Allocator, router: *pool_mod.Router, config: *const config_mod.Config) void {
     var in_buf: [IN_BUF_SIZE]u8 = undefined;
     var out_buf: [OUT_BUF_SIZE]u8 = undefined;
     var fr = Io.File.stdin().reader(io, &in_buf);
@@ -41,11 +41,11 @@ pub fn runStdio(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: 
         var line = Writer.Allocating.init(alloc);
         if (r.streamDelimiter(&line.writer, '\n')) |_| {
             r.toss(1); // discard the '\n' that streamDelimiter stopped at
-            processLine(io, alloc, pool, config, w, line.written());
+            processLine(io, alloc, router, config, w, line.written());
         } else |err| switch (err) {
             // Stream ended: handle a final line that had no trailing newline.
             error.EndOfStream => {
-                processLine(io, alloc, pool, config, w, line.written());
+                processLine(io, alloc, router, config, w, line.written());
                 return;
             },
             error.ReadFailed => {
@@ -60,14 +60,14 @@ pub fn runStdio(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: 
 fn processLine(
     io: Io,
     alloc: Allocator,
-    pool: *pool_mod.ConnectionPool,
+    router: *pool_mod.Router,
     config: *const config_mod.Config,
     w: *Writer,
     raw: []const u8,
 ) void {
     const line = std.mem.trimEnd(u8, raw, "\r");
     if (line.len == 0) return;
-    const response = server.handleRequest(io, alloc, line, pool, config) orelse return;
+    const response = server.handleRequest(io, alloc, line, router, config) orelse return;
     w.writeAll(response) catch return;
     w.writeByte('\n') catch return;
     w.flush() catch return;
@@ -75,7 +75,7 @@ fn processLine(
 
 // ---- HTTP transport (concurrent) ----------------------------------------
 
-pub fn runHttp(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *const config_mod.Config) void {
+pub fn runHttp(io: Io, gpa: Allocator, router: *pool_mod.Router, config: *const config_mod.Config) void {
     // `IpAddress.parse` only accepts IP literals; map the loopback hostname.
     const host = if (std.ascii.eqlIgnoreCase(config.server.host, "localhost"))
         "127.0.0.1"
@@ -111,7 +111,7 @@ pub fn runHttp(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *
             _ = f.await(io);
             slots[idx] = null;
         }
-        slots[idx] = io.async(handleConnTask, .{ io, gpa, pool, config, stream });
+        slots[idx] = io.async(handleConnTask, .{ io, gpa, router, config, stream });
         idx = (idx + 1) % MAX_INFLIGHT;
     }
 }
@@ -120,7 +120,7 @@ pub fn runHttp(io: Io, gpa: Allocator, pool: *pool_mod.ConnectionPool, config: *
 fn handleConnTask(
     io: Io,
     gpa: Allocator,
-    pool: *pool_mod.ConnectionPool,
+    router: *pool_mod.Router,
     config: *const config_mod.Config,
     stream_in: Io.net.Stream,
 ) void {
@@ -130,7 +130,7 @@ fn handleConnTask(
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
-    handleHttpConn(io, arena.allocator(), &stream, pool, config);
+    handleHttpConn(io, arena.allocator(), &stream, router, config);
 }
 
 const HttpRequest = struct {
@@ -142,7 +142,7 @@ fn handleHttpConn(
     io: Io,
     alloc: Allocator,
     stream: *Io.net.Stream,
-    pool: *pool_mod.ConnectionPool,
+    router: *pool_mod.Router,
     config: *const config_mod.Config,
 ) void {
     var in_buf: [IN_BUF_SIZE]u8 = undefined;
@@ -175,7 +175,7 @@ fn handleHttpConn(
         return;
     };
 
-    const response = server.handleRequest(io, alloc, body, pool, config) orelse "";
+    const response = server.handleRequest(io, alloc, body, router, config) orelse "";
     sendHttp(w, "200 OK", response);
 }
 

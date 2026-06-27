@@ -72,6 +72,15 @@ pub fn isWriteTool(name: []const u8) bool {
     return write_names.has(name);
 }
 
+/// Which database file a tool operates on. RAG document/chunk tools and the
+/// (DB-free) document-extraction tools use the `rag` file; the knowledge-graph
+/// tools use the `kg` file. The split lets KG and RAG writes proceed without
+/// contending for a single database's write lock.
+pub fn componentFor(name: []const u8) pool.Component {
+    if (std.mem.startsWith(u8, name, "rag_") or std.mem.startsWith(u8, name, "doc_")) return .rag;
+    return .kg;
+}
+
 // ---- shared helpers for handlers ----------------------------------------
 
 pub fn errPayload(msg: []const u8) Payload {

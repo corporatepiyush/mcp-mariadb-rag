@@ -4,12 +4,18 @@ const server = @import("../src/server.zig");
 const pool_mod = @import("../src/pool.zig");
 const config_mod = @import("../src/config.zig");
 
-fn createTestPool(io: std.Io, allocator: std.mem.Allocator) !pool_mod.ConnectionPool {
-    return try pool_mod.ConnectionPool.init(io, allocator, "sqlite:///tmp/test_mcp.db", .{
+// Returns a Router (the type handleRequest now takes). Both component pools use
+// the same test DB file — fine for the routing/error-path tests here.
+fn createTestPool(io: std.Io, allocator: std.mem.Allocator) !pool_mod.Router {
+    const opts = pool_mod.Options{
         .min_size = 0,
         .max_size = 1,
         .tls = .{ .enforce = false, .verify = false, .ca_path = null },
-    });
+    };
+    return .{
+        .kg = try pool_mod.ConnectionPool.init(io, allocator, "sqlite:///tmp/test_mcp.db", opts),
+        .rag = try pool_mod.ConnectionPool.init(io, allocator, "sqlite:///tmp/test_mcp.db", opts),
+    };
 }
 
 fn createTestConfig(allocator: std.mem.Allocator) config_mod.Config {
@@ -45,7 +51,7 @@ fn createTestConfig(allocator: std.mem.Allocator) config_mod.Config {
 fn handle(
     allocator: std.mem.Allocator,
     body: []const u8,
-    pool: *pool_mod.ConnectionPool,
+    pool: *pool_mod.Router,
     config: *const config_mod.Config,
     io: std.Io,
 ) ?[]const u8 {

@@ -28,24 +28,28 @@ const schema_rag = @import("../src/rag/schema.zig");
 
 const Fixture = struct {
     threaded: Io.Threaded,
-    pool: pool_mod.ConnectionPool,
+    router: pool_mod.Router,
     config: config_mod.Config,
 
     fn init(self: *Fixture) !void {
         self.threaded = .init(testing.allocator, .{});
-        // Shared-cache in-memory DB: every pooled connection sees the same
-        // schema, and min_size>=1 keeps it alive for the fixture's lifetime.
-        self.pool = try pool_mod.ConnectionPool.init(self.threaded.io(), testing.allocator, "sqlite://", .{
+        // Shared-cache in-memory DB per component pool (same underlying DB, so
+        // schema is visible across both); min_size>=1 keeps it alive.
+        const opts = pool_mod.Options{
             .min_size = 1,
             .max_size = 4,
             .tls = .{ .enforce = false, .verify = false, .ca_path = null },
-        });
+        };
+        self.router = .{
+            .kg = try pool_mod.ConnectionPool.init(self.threaded.io(), testing.allocator, "sqlite://", opts),
+            .rag = try pool_mod.ConnectionPool.init(self.threaded.io(), testing.allocator, "sqlite://", opts),
+        };
         self.config = makeConfig();
         try self.initSchema();
     }
 
     fn deinit(self: *Fixture) void {
-        self.pool.close();
+        self.router.close();
         self.config.deinit(testing.allocator);
         self.threaded.deinit();
     }
@@ -55,7 +59,7 @@ const Fixture = struct {
     }
 
     fn initSchema(self: *Fixture) !void {
-        var conn = try self.pool.acquire();
+        var conn = try self.router.acquire(.rag);
         defer conn.deinit();
         inline for (.{
             schema_kg.writeCreateEntity,         schema_kg.writeCreateObservation,
@@ -76,7 +80,7 @@ const Fixture = struct {
     fn request(self: *Fixture, out: std.mem.Allocator, body: []const u8) !?[]const u8 {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
-        const resp = server.handleRequest(self.io(), arena.allocator(), body, &self.pool, &self.config) orelse return null;
+        const resp = server.handleRequest(self.io(), arena.allocator(), body, &self.router, &self.config) orelse return null;
         return try out.dupe(u8, resp);
     }
 
@@ -89,7 +93,7 @@ const Fixture = struct {
         const body = try std.fmt.allocPrint(a,
             "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"{s}\",\"arguments\":{s}}}}}",
             .{ tool, args_json });
-        const resp = server.handleRequest(self.io(), a, body, &self.pool, &self.config) orelse return null;
+        const resp = server.handleRequest(self.io(), a, body, &self.router, &self.config) orelse return null;
         // Unwrap result.content[0].text.
         const parsed = std.json.parseFromSlice(Value, a, resp, .{}) catch return try out.dupe(u8, resp);
         const result = parsed.value.object.get("result") orelse return try out.dupe(u8, resp);
@@ -242,7 +246,7 @@ test "fuzz: well-formed JSON-RPC with random tool names + random args" {
             "{{\"jsonrpc\":\"2.0\",\"id\":{d},\"method\":\"tools/call\",\"params\":{{\"name\":\"{s}\",\"arguments\":{s}}}}}",
             .{ rnd.int(u16), tool, args });
         // Whatever comes back must be valid JSON (the transport's contract).
-        if (server.handleRequest(fx.io(), a, body, &fx.pool, &fx.config)) |resp| {
+        if (server.handleRequest(fx.io(), a, body, &fx.router, &fx.config)) |resp| {
             const parsed = std.json.parseFromSlice(Value, a, resp, .{}) catch {
                 std.debug.print("non-JSON response for {s} {s}: {s}\n", .{ tool, args, resp });
                 return error.NonJsonResponse;

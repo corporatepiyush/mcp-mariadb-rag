@@ -97,7 +97,7 @@ pub fn handleRequest(
     io: std.Io,
     allocator: std.mem.Allocator,
     body: []const u8,
-    pool: *pool_mod.ConnectionPool,
+    router: *pool_mod.Router,
     config: *const config_mod.Config,
 ) ?[]const u8 {
     const trimmed = std.mem.trim(u8, body, " \t\n\r");
@@ -121,7 +121,7 @@ pub fn handleRequest(
     if (std.mem.eql(u8, method, "tools/list"))
         return render(allocator, writeToolsList, .{id});
     if (std.mem.eql(u8, method, "tools/call"))
-        return handleToolsCall(io, allocator, id, params, pool, config);
+        return handleToolsCall(io, allocator, id, params, router, config);
     if (std.mem.eql(u8, method, "ping"))
         return render(allocator, writeResult, .{ id, "null" });
     if (std.mem.startsWith(u8, method, "notifications/"))
@@ -137,7 +137,7 @@ fn handleToolsCall(
     allocator: std.mem.Allocator,
     id: ?Value,
     params: ?Value,
-    pool: *pool_mod.ConnectionPool,
+    router: *pool_mod.Router,
     config: *const config_mod.Config,
 ) ?[]const u8 {
     const tool_name = actions.getStringParam(params, "name") orelse "";
@@ -152,7 +152,8 @@ fn handleToolsCall(
     const handler = actions.registry.get(tool_name) orelse
         return render(allocator, writeRpcError, .{ id, @as(i64, -32601), "Tool not found" });
 
-    var conn = pool.acquire() catch
+    // Route to the component's own database file/pool.
+    var conn = router.acquire(actions.componentFor(tool_name)) catch
         return render(allocator, writeRpcError, .{ id, @as(i64, -32001), "Pool error" });
     defer conn.deinit();
 

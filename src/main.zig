@@ -7,29 +7,35 @@ const schema_rag = @import("rag/schema.zig");
 const index_store = @import("index/store.zig");
 const query_cache = @import("generate/cache.zig");
 
-fn initKnowledgeGraphSchema(pool: *pool_mod.ConnectionPool) !void {
-    var conn = try pool.acquire();
-    defer conn.deinit();
-
-    inline for (.{
-        schema_kg.writeCreateEntity,
-        schema_kg.writeCreateObservation,
-        schema_kg.writeCreateRelation,
-        schema_kg.writeCreateTypeDict,
-        schema_kg.writeCreateGraphStat,
-        schema_kg.writeCreateVectorEmbedding,
-        // RAG document/chunk store same init path.
-        schema_rag.writeCreateDocument,
-        schema_rag.writeCreateChunk,
-        schema_rag.writeCreateChunkIndex,
-    }) |write_fn| {
+fn execDDL(conn: *pool_mod.PooledConnection, write_fns: anytype) !void {
+    inline for (write_fns) |write_fn| {
         var buf: [4096]u8 = undefined;
         var w = std.Io.Writer.fixed(&buf);
         try write_fn(&w);
         _ = try conn.execute(w.buffered());
     }
+}
 
-    std.log.info("Knowledge graph + RAG schema initialized (8 tables)", .{});
+/// Initialise each component's schema in its own database file.
+fn initSchema(router: *pool_mod.Router) !void {
+    {
+        var conn = try router.acquire(.kg);
+        defer conn.deinit();
+        try execDDL(&conn, .{
+            schema_kg.writeCreateEntity,    schema_kg.writeCreateObservation,
+            schema_kg.writeCreateRelation,  schema_kg.writeCreateTypeDict,
+            schema_kg.writeCreateGraphStat, schema_kg.writeCreateVectorEmbedding,
+        });
+    }
+    {
+        var conn = try router.acquire(.rag);
+        defer conn.deinit();
+        try execDDL(&conn, .{
+            schema_rag.writeCreateDocument, schema_rag.writeCreateChunk,
+            schema_rag.writeCreateChunkIndex,
+        });
+    }
+    std.log.info("Schema initialized: kg + rag databases", .{});
 }
 
 pub fn main() !void {
@@ -63,20 +69,36 @@ pub fn main() !void {
         std.log.warn("No auth token configured. Set MCP_AUTH_TOKEN for security.", .{});
     }
 
-    var pool = try pool_mod.ConnectionPool.init(io, allocator, config.database_url, .{
-        .min_size = config.pool.min_size,
-        .max_size = config.pool.max_size,
-        .tls = config.tls,
-        .tuning = config.sqlite,
-    });
-    defer pool.close();
+    // Per-component database files: kg + rag get separate SQLite files (or
+    // shared in-memory), each with its own pool, WAL, and PRAGMA profile, so a
+    // write in one component never blocks the other.
+    const kg_url = try config_mod.componentUrl(allocator, config.database_url, "kg");
+    defer allocator.free(kg_url);
+    const rag_url = try config_mod.componentUrl(allocator, config.database_url, "rag");
+    defer allocator.free(rag_url);
 
-    std.log.info("Connection pool initialized: min={d}, max={d}, tls={}", .{
-        config.pool.min_size, config.pool.max_size, config.tls.enforce,
+    var router = pool_mod.Router{
+        .kg = try pool_mod.ConnectionPool.init(io, allocator, kg_url, .{
+            .min_size = config.pool.min_size,
+            .max_size = config.pool.max_size,
+            .tls = config.tls,
+            .tuning = config.sqliteFor(.kg),
+        }),
+        .rag = try pool_mod.ConnectionPool.init(io, allocator, rag_url, .{
+            .min_size = config.pool.min_size,
+            .max_size = config.pool.max_size,
+            .tls = config.tls,
+            .tuning = config.sqliteFor(.rag),
+        }),
+    };
+    defer router.close();
+
+    std.log.info("Pools: kg={s} rag={s} (min={d} max={d})", .{
+        kg_url, rag_url, config.pool.min_size, config.pool.max_size,
     });
 
-    initKnowledgeGraphSchema(&pool) catch |err| {
-        std.log.warn("KG schema init failed (will be retried on first use): {s}", .{@errorName(err)});
+    initSchema(&router) catch |err| {
+        std.log.warn("Schema init failed (will be retried on first use): {s}", .{@errorName(err)});
     };
 
     // Publish the ANN index cache (no-op for queries when MCP_INDEX_TYPE=flat).
@@ -100,10 +122,10 @@ pub fn main() !void {
 
     if (config.server.stdio) {
         std.log.info("Running in stdio mode", .{});
-        transport.runStdio(io, allocator, &pool, &config);
+        transport.runStdio(io, allocator, &router, &config);
     } else {
         std.log.info("Starting HTTP server on port {d}", .{config.server.http_port});
-        transport.runHttp(io, allocator, &pool, &config);
+        transport.runHttp(io, allocator, &router, &config);
     }
 
     std.log.info("Server shutdown complete", .{});
