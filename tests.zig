@@ -37,4 +37,6 @@ comptime {
     _ = @import("tests/kg_bench.zig");
     _ = @import("tests/rag_test.zig");
     _ = @import("tests/rag_bench.zig");
+    _ = @import("tests/transport_test.zig");
+    _ = @import("tests/e2e_test.zig");
 }

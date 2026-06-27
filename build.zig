@@ -38,6 +38,8 @@ pub fn build(b: *std.Build) void {
 
     const unit_tests = b.addTest(.{ .root_module = test_mod });
     const run_tests = b.addRunArtifact(unit_tests);
+    // The e2e tests drive the installed binary over stdio, so build it first.
+    run_tests.step.dependOn(b.getInstallStep());
     const test_step = b.step("test", "Run unit and integration tests");
     test_step.dependOn(&run_tests.step);
 }
