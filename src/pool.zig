@@ -153,6 +153,14 @@ pub const DatabaseConn = struct {
         try sqlite.check(sqlite.sqlite3_step(stmt));
         return @intCast(sqlite.sqlite3_changes(self.db));
     }
+
+    /// Run a multi-statement DDL script (`;`-separated). Our schema files
+    /// contain no semicolons except statement terminators (no triggers/strings),
+    /// so a simple split is safe and avoids the null-termination dance of
+    /// `sqlite3_exec`.
+    pub fn executeScript(self: *DatabaseConn, script: []const u8) !void {
+        try sqlite.execScript(self.db, script);
+    }
 };
 
 pub const PooledConnection = struct {
@@ -178,6 +186,13 @@ pub const PooledConnection = struct {
 
     pub fn execute(self: *PooledConnection, sql: []const u8) !u64 {
         return self.conn.execute(sql) catch |err| {
+            self.valid = false;
+            return err;
+        };
+    }
+
+    pub fn executeScript(self: *PooledConnection, script: []const u8) !void {
+        return self.conn.executeScript(script) catch |err| {
             self.valid = false;
             return err;
         };

@@ -169,14 +169,10 @@ fn hydrate(db: *sqlite.sqlite3, allocator: Allocator, matches: []Match) !void {
 const testing = std.testing;
 const schema = @import("schema.zig");
 
-/// Create the real chunk table + index from the production DDL.
+/// Create the real RAG tables + index from the canonical embedded DDL.
 fn createSchema(db: *sqlite.sqlite3, a: Allocator) !void {
-    inline for (.{ schema.writeCreateChunk, schema.writeCreateChunkIndex }) |write_fn| {
-        var buf: [1024]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        try write_fn(&w);
-        try sqlite.exec(db, try a.dupeZ(u8, w.buffered()));
-    }
+    _ = a;
+    try sqlite.execScript(db, schema.ddl);
 }
 
 /// Render the full-scan SQL once.
@@ -233,12 +229,7 @@ test "vectorScanTopK returns the true nearest, not an arbitrary prefix" {
 
     const db = try sqlite.openInMemory();
     defer sqlite.close(db);
-    {
-        var buf: [1024]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        try schema.writeCreateChunk(&w);
-        try sqlite.exec(db, try a.dupeZ(u8, w.buffered()));
-    }
+    try createSchema(db, a);
 
     // 50 chunks with fills 0.00, 0.02, … 0.98. The query sits at 0.50, so the
     // nearest are ordinals 25, 24/26, 23/27, …  A LIMIT-k scan would instead
@@ -276,12 +267,7 @@ test "vectorScanTopK with k=0 and empty table" {
 
     const db = try sqlite.openInMemory();
     defer sqlite.close(db);
-    {
-        var buf: [1024]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        try schema.writeCreateChunk(&w);
-        try sqlite.exec(db, try a.dupeZ(u8, w.buffered()));
-    }
+    try createSchema(db, a);
 
     var qvec: [8]f32 = undefined;
     @memset(&qvec, 0.5);

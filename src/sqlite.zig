@@ -133,6 +133,51 @@ pub fn prepare(db: *sqlite3, sql: []const u8) Error!*sqlite3_stmt {
     return stmt.?;
 }
 
+/// Execute a multi-statement DDL script via prepare/step, so it works on a
+/// borrowed `[]const u8` (e.g. an embedded .sql file) without the
+/// null-termination `sqlite3_exec` requires. Statements are split on `;`, but
+/// the splitter skips `;` inside `--` line comments and `'…'` string literals,
+/// so commentary (including "(release 3.37);") and quoted text don't terminate a
+/// statement early. Comment/whitespace-only chunks compile to a null statement
+/// and are skipped.
+pub fn execScript(db: *sqlite3, script: []const u8) Error!void {
+    var start: usize = 0;
+    var i: usize = 0;
+    var in_line_comment = false;
+    var in_string = false;
+    while (i < script.len) : (i += 1) {
+        const ch = script[i];
+        if (in_line_comment) {
+            if (ch == '\n') in_line_comment = false;
+            continue;
+        }
+        if (in_string) {
+            if (ch == '\'') in_string = false;
+            continue;
+        }
+        if (ch == '-' and i + 1 < script.len and script[i + 1] == '-') {
+            in_line_comment = true;
+            i += 1;
+        } else if (ch == '\'') {
+            in_string = true;
+        } else if (ch == ';') {
+            try execOne(db, script[start..i]);
+            start = i + 1;
+        }
+    }
+    try execOne(db, script[start..]); // trailing statement without a ';'
+}
+
+fn execOne(db: *sqlite3, chunk: []const u8) Error!void {
+    const trimmed = std.mem.trim(u8, chunk, " \t\r\n");
+    if (trimmed.len == 0) return;
+    var stmt: ?*sqlite3_stmt = null;
+    try check(sqlite3_prepare_v3(db, trimmed.ptr, @intCast(trimmed.len), 0, &stmt, null));
+    const s = stmt orelse return; // comment-only chunk → nothing to run
+    defer finalize(s);
+    try check(sqlite3_step(s));
+}
+
 pub fn finalize(stmt: *sqlite3_stmt) void {
     _ = sqlite3_finalize(stmt);
 }
@@ -304,5 +349,48 @@ test "fuzz - bind with random values" {
         }
 
         _ = sqlite3_step(stmt);
+    }
+}
+
+test "execScript runs multiple statements, ignoring ';' in comments and strings" {
+    const db = try openInMemory();
+    defer close(db);
+
+    // A '--' comment containing a semicolon and a string literal containing one
+    // must NOT terminate the statement early.
+    try execScript(db,
+        \\-- a comment with a semicolon; it must not split here
+        \\CREATE TABLE a(x TEXT NOT NULL DEFAULT 'has ; inside') STRICT;
+        \\CREATE TABLE b(y INTEGER) STRICT;
+        \\-- trailing comment-only chunk
+    );
+
+    // Both tables exist iff these inserts prepare+step cleanly.
+    inline for (.{ "INSERT INTO a(x) VALUES('z')", "INSERT INTO b(y) VALUES(1)" }) |sql| {
+        const s = try prepare(db, sql);
+        defer finalize(s);
+        try check(sqlite3_step(s));
+    }
+}
+
+test "execScript: empty/comment-only scripts are a no-op" {
+    const db = try openInMemory();
+    defer close(db);
+    try execScript(db, "");
+    try execScript(db, "   \n\t  ");
+    try execScript(db, "-- only a comment\n-- and another");
+    try execScript(db, ";;; ; ;");
+}
+
+test "fuzz: execScript never panics on random bytes" {
+    const db = try openInMemory();
+    defer close(db);
+    var prng = std.Random.DefaultPrng.init(0x5C12_F00D);
+    const rnd = prng.random();
+    var buf: [160]u8 = undefined;
+    for (0..1500) |_| {
+        const len = rnd.intRangeAtMost(usize, 0, buf.len);
+        for (buf[0..len]) |*b| b.* = rnd.int(u8);
+        execScript(db, buf[0..len]) catch {}; // any SqliteError is fine; must not panic
     }
 }

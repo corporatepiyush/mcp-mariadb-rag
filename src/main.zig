@@ -7,33 +7,18 @@ const schema_rag = @import("rag/schema.zig");
 const index_store = @import("index/store.zig");
 const query_cache = @import("generate/cache.zig");
 
-fn execDDL(conn: *pool_mod.PooledConnection, write_fns: anytype) !void {
-    inline for (write_fns) |write_fn| {
-        var buf: [4096]u8 = undefined;
-        var w = std.Io.Writer.fixed(&buf);
-        try write_fn(&w);
-        _ = try conn.execute(w.buffered());
-    }
-}
-
-/// Initialise each component's schema in its own database file.
+/// Initialise each component's schema in its own database file from the
+/// canonical embedded `.sql`.
 fn initSchema(router: *pool_mod.Router) !void {
     {
         var conn = try router.acquire(.kg);
         defer conn.deinit();
-        try execDDL(&conn, .{
-            schema_kg.writeCreateEntity,    schema_kg.writeCreateObservation,
-            schema_kg.writeCreateRelation,  schema_kg.writeCreateTypeDict,
-            schema_kg.writeCreateGraphStat, schema_kg.writeCreateVectorEmbedding,
-        });
+        try conn.executeScript(schema_kg.ddl);
     }
     {
         var conn = try router.acquire(.rag);
         defer conn.deinit();
-        try execDDL(&conn, .{
-            schema_rag.writeCreateDocument, schema_rag.writeCreateChunk,
-            schema_rag.writeCreateChunkIndex,
-        });
+        try conn.executeScript(schema_rag.ddl);
     }
     std.log.info("Schema initialized: kg + rag databases", .{});
 }

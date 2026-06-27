@@ -24,12 +24,7 @@ fn parseJson(a: Allocator, src: []const u8) Value {
 }
 
 fn createTables(conn: *PooledConn) void {
-    inline for (.{ schema.writeCreateDocument, schema.writeCreateChunk }) |write_fn| {
-        var buf: [2048]u8 = undefined;
-        var w = Writer.fixed(&buf);
-        _ = write_fn(&w) catch {};
-        _ = conn.execute(w.buffered()) catch {};
-    }
+    conn.executeScript(schema.ddl) catch {};
 }
 
 fn dropTables(conn: *PooledConn) void {

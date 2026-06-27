@@ -94,13 +94,18 @@ fn writeEmbedding(w: *Writer, fill: f32) !void {
 }
 
 fn tmpDb(allocator: std.mem.Allocator, io: Io, name: []const u8) ![]const u8 {
-    // Fresh DB per test; remove any leftover (+ WAL/SHM) from a prior run.
+    // Fresh DB per test. The Router derives per-component files (name.kg.db /
+    // name.rag.db) from the base, so remove the base AND both component files,
+    // each with their -wal/-shm sidecars, or a prior run's data leaks in.
     const cwd = std.Io.Dir.cwd();
-    cwd.deleteFile(io, name) catch {};
-    inline for (.{ "-wal", "-shm" }) |suffix| {
-        var buf: [256]u8 = undefined;
-        const p = std.fmt.bufPrint(&buf, "{s}{s}", .{ name, suffix }) catch name;
-        cwd.deleteFile(io, p) catch {};
+    const base = name[0 .. name.len - 3]; // strip ".db"
+    inline for (.{ "", ".kg", ".rag" }) |comp| {
+        inline for (.{ "", "-wal", "-shm" }) |sidecar| {
+            var buf: [256]u8 = undefined;
+            if (std.fmt.bufPrint(&buf, "{s}{s}.db{s}", .{ base, comp, sidecar })) |p| {
+                cwd.deleteFile(io, p) catch {};
+            } else |_| {}
+        }
     }
     return std.fmt.allocPrint(allocator, "sqlite:///{s}", .{name});
 }

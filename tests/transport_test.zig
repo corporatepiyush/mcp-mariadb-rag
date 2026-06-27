@@ -59,19 +59,12 @@ const Fixture = struct {
     }
 
     fn initSchema(self: *Fixture) !void {
+        // Shared in-memory DB across both component pools, so applying both
+        // schema scripts on one connection makes every table visible.
         var conn = try self.router.acquire(.rag);
         defer conn.deinit();
-        inline for (.{
-            schema_kg.writeCreateEntity,         schema_kg.writeCreateObservation,
-            schema_kg.writeCreateRelation,       schema_kg.writeCreateVectorEmbedding,
-            schema_rag.writeCreateDocument,      schema_rag.writeCreateChunk,
-            schema_rag.writeCreateChunkIndex,
-        }) |write_fn| {
-            var buf: [4096]u8 = undefined;
-            var w = std.Io.Writer.fixed(&buf);
-            try write_fn(&w);
-            _ = try conn.execute(w.buffered());
-        }
+        try conn.executeScript(schema_kg.ddl);
+        try conn.executeScript(schema_rag.ddl);
     }
 
     /// Invoke `handleRequest` with `body` inside a fresh arena, returning the

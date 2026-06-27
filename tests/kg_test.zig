@@ -34,17 +34,7 @@ fn vectorArgs(allocator: std.mem.Allocator, id: []const u8, entity: []const u8, 
 }
 
 fn createTables(conn: *pool_mod.PooledConnection) void {
-    inline for (.{
-        schema.writeCreateEntity,
-        schema.writeCreateObservation,
-        schema.writeCreateRelation,
-        schema.writeCreateVectorEmbedding,
-    }) |write_fn| {
-        var buf: [2048]u8 = undefined;
-        var w = Writer.fixed(&buf);
-        _ = write_fn(&w) catch {};
-        _ = conn.execute(w.buffered()) catch {};
-    }
+    conn.executeScript(schema.ddl) catch {};
 }
 
 fn dropTables(conn: *pool_mod.PooledConnection) void {

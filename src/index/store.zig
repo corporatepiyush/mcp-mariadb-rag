@@ -195,10 +195,8 @@ pub fn global() ?*Store {
 const testing = std.testing;
 
 fn createSchema(db: *sqlite.sqlite3, a: Allocator) !void {
-    var buf: [1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    try schema.writeCreateChunk(&w);
-    try sqlite.exec(db, try a.dupeZ(u8, w.buffered()));
+    _ = a;
+    try sqlite.execScript(db, schema.ddl);
 }
 
 fn insertVec(db: *sqlite.sqlite3, a: Allocator, id: []const u8, fill: f32) !void {
