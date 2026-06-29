@@ -19,6 +19,7 @@ const xml_mod = @import("xml.zig");
 const docx_mod = @import("docx.zig");
 const pdf_mod = @import("pdf.zig");
 const parquet_mod = @import("parquet.zig");
+const arrow_mod = @import("arrow.zig");
 const iceberg_mod = @import("iceberg.zig");
 const legacy_doc_mod = @import("doc.zig");
 const inflate = @import("inflate.zig");
@@ -95,11 +96,15 @@ pub fn extractAs(a: Allocator, bytes: []const u8, fmt: Format) Error!Extracted {
             };
             break :blk .{ .text = x.text, .units = x.units };
         },
-        // Recognized, extraction pending (validated for honest framing errors).
-        .parquet => {
-            _ = parquet_mod.locateFooter(bytes) catch return error.Corrupt;
-            return error.Pending;
+        .parquet => blk: {
+            const x = parquet_mod.toText(a, bytes) catch |e| return mapColumnarErr(e);
+            break :blk .{ .text = x.text, .units = x.units };
         },
+        .arrow => blk: {
+            const x = arrow_mod.toText(a, bytes) catch |e| return mapColumnarErr(e);
+            break :blk .{ .text = x.text, .units = x.units };
+        },
+        // Recognized, extraction pending (validated for honest framing errors).
         .legacy_doc => {
             _ = legacy_doc_mod.readHeader(bytes) catch return error.Corrupt;
             return error.Pending;
@@ -127,16 +132,30 @@ fn mapContainerErr(e: anyerror) Error {
     };
 }
 
+/// Map the columnar readers' errors (Parquet/Arrow) onto the pipeline's set.
+/// `Unsupported` is preserved so the caller can tell "recognized but this
+/// variant (codec/encoding/nesting) isn't handled" from outright corruption.
+fn mapColumnarErr(e: anyerror) Error {
+    return switch (e) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.Unsupported => error.Unsupported,
+        else => error.Corrupt, // NotParquet/NotArrow/Truncated/Corrupt
+    };
+}
+
 /// One-line human status string for an `Error` (for tool responses).
 pub fn errorMessage(e: Error, fmt: Format) []const u8 {
     return switch (e) {
         error.OutOfMemory => "Out of memory during extraction",
         error.Pending => switch (fmt) {
-            .parquet => "Recognized Parquet; columnar decode is pending (native reader in progress)",
             .legacy_doc => "Recognized legacy .doc (OLE2/CFB); text decode is pending (native reader in progress)",
             else => "Format recognized; extractor pending",
         },
-        error.Unsupported => "Unsupported or unrecognized document format",
+        error.Unsupported => switch (fmt) {
+            .parquet => "Parquet recognized, but it uses an unsupported codec or encoding (e.g. ZSTD/LZ4) or a nested schema",
+            .arrow => "Arrow recognized, but it uses body compression or a nested/unsupported column type",
+            else => "Unsupported or unrecognized document format",
+        },
         error.Corrupt => "Document is corrupt or malformed",
         error.NotFound => "Expected container member not found",
     };

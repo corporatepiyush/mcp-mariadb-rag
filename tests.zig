@@ -7,6 +7,7 @@ comptime {
     _ = @import("tests/actions_rag_test.zig");
     _ = @import("tests/actions_test.zig");
     _ = @import("tests/config_test.zig");
+    _ = @import("tests/doc_arrow_test.zig");
     _ = @import("tests/doc_csv_test.zig");
     _ = @import("tests/doc_detect_test.zig");
     _ = @import("tests/doc_doc_test.zig");
@@ -18,6 +19,8 @@ comptime {
     _ = @import("tests/doc_parquet_test.zig");
     _ = @import("tests/doc_pdf_test.zig");
     _ = @import("tests/doc_pool_test.zig");
+    _ = @import("tests/doc_snappy_test.zig");
+    _ = @import("tests/doc_thrift_test.zig");
     _ = @import("tests/doc_text_test.zig");
     _ = @import("tests/doc_xml_test.zig");
     _ = @import("tests/doc_zip_test.zig");

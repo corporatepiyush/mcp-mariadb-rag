@@ -20,6 +20,7 @@ pub const Format = enum {
     docx,
     pdf,
     parquet,
+    arrow,
     iceberg,
     legacy_doc, // OLE2/CFB Word .doc
     gzip,
@@ -34,8 +35,8 @@ pub const Format = enum {
     /// Scaffolded formats report `false` so callers get an honest answer.
     pub fn isExtractable(f: Format) bool {
         return switch (f) {
-            .text, .markdown, .csv, .tsv, .json, .ndjson, .xml, .html, .docx, .pdf => true,
-            .parquet, .iceberg, .legacy_doc, .gzip, .unknown => false,
+            .text, .markdown, .csv, .tsv, .json, .ndjson, .xml, .html, .docx, .pdf, .parquet, .arrow => true,
+            .iceberg, .legacy_doc, .gzip, .unknown => false,
         };
     }
 };
@@ -68,6 +69,14 @@ pub fn detect(bytes: []const u8, hint: ?[]const u8) Format {
     if (bytes.len >= 8 and
         std.mem.eql(u8, bytes[0..4], "PAR1") and
         std.mem.eql(u8, bytes[bytes.len - 4 ..], "PAR1")) return .parquet;
+
+    // Arrow IPC. File format: "ARROW1" magic at both ends. Stream format: the
+    // first word is the 0xFFFFFFFF continuation marker that precedes every
+    // encapsulated message.
+    if (bytes.len >= 12 and
+        std.mem.eql(u8, bytes[0..6], "ARROW1") and
+        std.mem.eql(u8, bytes[bytes.len - 6 ..], "ARROW1")) return .arrow;
+    if (bytes.len >= 8 and std.mem.eql(u8, bytes[0..4], &[_]u8{ 0xff, 0xff, 0xff, 0xff })) return .arrow;
 
     // ZIP container: could be DOCX/XLSX/PPTX or a plain zip. Peek the local
     // file name that follows the 30-byte local-file header.

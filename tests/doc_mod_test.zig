@@ -7,7 +7,28 @@ const srcmod = @import("../src/doc/mod.zig");
 const Format = srcmod.Format;
 const extract = srcmod.extract;
 
+const parquet_file = @embedFile("fixtures/flat_snappy.parquet");
+const arrow_file = @embedFile("fixtures/flat.arrow");
+
 // ── Tests ─────────────────────────────────────────────────────────────
+
+test "extract detects + decodes a real Parquet file end to end" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const x = try extract(arena.allocator(), parquet_file, null);
+    try testing.expectEqual(Format.parquet, x.format);
+    try testing.expectEqual(@as(usize, 4), x.units);
+    try testing.expect(std.mem.indexOf(u8, x.text, "alice") != null);
+}
+
+test "extract detects + decodes a real Arrow IPC file end to end" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const x = try extract(arena.allocator(), arrow_file, null);
+    try testing.expectEqual(Format.arrow, x.format);
+    try testing.expectEqual(@as(usize, 4), x.units);
+    try testing.expect(std.mem.indexOf(u8, x.text, "carol") != null);
+}
 
 test "extract dispatches by detected format" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
@@ -26,7 +47,9 @@ test "extract dispatches by detected format" {
     try testing.expectEqual(Format.text, txt.format);
 }
 
-test "extract reports pending for parquet" {
+test "extract reports corrupt for a framed-but-garbage parquet" {
+    // PAR1 framing is valid but the footer metadata is junk: the reader now
+    // decodes Parquet for real, so this is reported as Corrupt, not Pending.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     var buf: [17]u8 = undefined;
@@ -34,7 +57,7 @@ test "extract reports pending for parquet" {
     @memset(buf[4..9], 'M');
     std.mem.writeInt(u32, buf[9..13], 5, .little);
     @memcpy(buf[13..17], "PAR1");
-    try testing.expectError(error.Pending, extract(arena.allocator(), &buf, null));
+    try testing.expectError(error.Corrupt, extract(arena.allocator(), &buf, null));
 }
 
 test "fuzz: extract never panics on random bytes" {

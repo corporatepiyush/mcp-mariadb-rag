@@ -18,6 +18,13 @@ test "detect: binary signatures" {
     try testing.expectEqual(Format.gzip, detect(&[_]u8{ 0x1f, 0x8b, 0x08 }, null));
 }
 
+test "detect: arrow IPC file and stream framings" {
+    // File format: ARROW1 magic at both ends.
+    try testing.expectEqual(Format.arrow, detect("ARROW1\x00\x00....ARROW1", null));
+    // Stream format: leading 0xFFFFFFFF continuation marker.
+    try testing.expectEqual(Format.arrow, detect(&[_]u8{ 0xff, 0xff, 0xff, 0xff, 0x10, 0, 0, 0 }, null));
+}
+
 test "detect: docx zip" {
     // local file header naming word/document.xml
     var buf: [64]u8 = undefined;
