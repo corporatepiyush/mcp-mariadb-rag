@@ -124,6 +124,48 @@ test "rag_integration: ingest -> stats -> get -> delete" {
     try testing.expect(std.mem.indexOf(u8, st2.text, "\"document_count\":0") != null);
 }
 
+test "rag_integration: chunk upsert commits across batch windows" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Force a window of 2 so the 3-chunk doc spans two committed transactions;
+    // the document row (written in the first window) and all 3 chunks must land.
+    var caps: config_mod.Config = .{
+        .database_url = "",
+        .server = undefined,
+        .pool = undefined,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+        .write_batch_rows = 2,
+    };
+    config_mod.setActive(&caps);
+    defer config_mod.setActive(null);
+
+    const ing = rag.ingestDocument(io, a, &conn, parseJson(a, ingestArgs(a)));
+    try testing.expect(!ing.is_error);
+    try testing.expect(std.mem.indexOf(u8, ing.text, "\"chunks_ingested\":3") != null);
+
+    const st = rag.stats(io, a, &conn, null);
+    try testing.expect(std.mem.indexOf(u8, st.text, "\"document_count\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, st.text, "\"chunk_count\":3") != null);
+}
+
 test "rag_integration: re-ingesting identical content is deduped (skipped)" {
     const url = dbUrl() orelse return;
 

@@ -23,6 +23,7 @@ const index_store = @import("../index/store.zig");
 const trace = @import("../observe/trace.zig");
 const query_cache = @import("../generate/cache.zig");
 const config_mod = @import("../config.zig");
+const sqlite = @import("../sqlite.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -301,6 +302,79 @@ fn errFromChunkParse(allocator: Allocator, err: anyerror) Payload {
 
 /// Store a document and all of its (already-embedded) chunks in two statements:
 /// one document upsert, one batched chunk upsert.
+const WriteError = error{ BeginFailed, DocFailed, ChunkFailed, CommitFailed, Prepare };
+
+/// Bind one chunk row into the prepared upsert statement and step it. Reset +
+/// clear first so the statement is reusable across rows.
+fn bindAndStep(stmt: *sqlite.sqlite3_stmt, r: query.ChunkRow) !void {
+    try sqlite.check(sqlite.sqlite3_reset(stmt));
+    try sqlite.check(sqlite.sqlite3_clear_bindings(stmt));
+    try bindText(stmt, 1, r.id);
+    try bindText(stmt, 2, r.document_id);
+    try sqlite.check(sqlite.sqlite3_bind_int64(stmt, 3, @intCast(r.ordinal)));
+    try bindText(stmt, 4, r.content);
+    try sqlite.check(sqlite.sqlite3_bind_int64(stmt, 5, @intCast(r.token_count)));
+    const vbytes = std.mem.sliceAsBytes(r.vector);
+    try sqlite.check(sqlite.sqlite3_bind_blob(stmt, 6, vbytes.ptr, @intCast(vbytes.len), sqlite.SQLITE_TRANSIENT));
+    try sqlite.check(sqlite.sqlite3_step(stmt)); // expects SQLITE_DONE
+}
+
+fn bindText(stmt: *sqlite.sqlite3_stmt, idx: c_int, s: []const u8) !void {
+    try sqlite.check(sqlite.sqlite3_bind_text(stmt, idx, s.ptr, @intCast(s.len), sqlite.SQLITE_TRANSIENT));
+}
+
+/// Upsert `rows` (and, on the first window, `doc_sql`) through one reusable
+/// bound prepared statement, committing every `batch_rows` rows. Binding the
+/// embedding BLOB directly avoids hex-encoding every vector into SQL text; the
+/// window bounds transaction/WAL size for very large ingests. `rows.len >= 1`.
+fn writeChunksTxn(conn: *PooledConn, allocator: Allocator, doc_sql: ?[]const u8, rows: []const query.ChunkRow, batch_rows: usize) WriteError!void {
+    const stmt_sql = mod.renderToOwned(allocator, query.writeUpsertChunkStmt, .{}) catch return error.Prepare;
+    defer allocator.free(stmt_sql);
+    const stmt = sqlite.prepare(conn.conn.db, stmt_sql) catch {
+        conn.valid = false;
+        return error.Prepare;
+    };
+    defer sqlite.finalize(stmt);
+
+    const window = @max(@as(usize, 1), batch_rows);
+    var i: usize = 0;
+    var first = true;
+    while (i < rows.len) {
+        const end = @min(i + window, rows.len);
+        conn.begin() catch return error.BeginFailed;
+        if (first) {
+            if (doc_sql) |ds| _ = conn.execute(ds) catch {
+                conn.rollback();
+                return error.DocFailed;
+            };
+            first = false;
+        }
+        for (rows[i..end]) |r| bindAndStep(stmt, r) catch {
+            conn.rollback();
+            return error.ChunkFailed;
+        };
+        conn.commit() catch {
+            conn.rollback();
+            return error.CommitFailed;
+        };
+        i = end;
+    }
+}
+
+fn writeErrPayload(e: WriteError) Payload {
+    return mod.errPayload(switch (e) {
+        error.BeginFailed => "Failed to begin transaction",
+        error.DocFailed => "Document upsert failed",
+        error.ChunkFailed => "Chunk upsert failed",
+        error.CommitFailed => "Failed to commit transaction",
+        error.Prepare => "Failed to prepare chunk upsert",
+    });
+}
+
+fn batchRows() usize {
+    return if (config_mod.active()) |c| c.write_batch_rows else 5000;
+}
+
 pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Payload {
     const id = mod.getStringParam(args, "id") orelse return mod.errPayload("Missing 'id' parameter");
     const chunks_val = mod.getArrayParam(args, "chunks") orelse return mod.errPayload("Missing 'chunks' parameter");
@@ -329,25 +403,11 @@ pub fn ingestDocument(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Val
     const doc_sql = mod.renderToOwned(allocator, query.writeUpsertDocument, .{ id, uri, title, metadata, rows.len, hash }) catch
         return mod.errPayload("Allocation error");
     defer allocator.free(doc_sql);
-    const chunk_sql = mod.renderToOwned(allocator, query.writeUpsertChunks, .{rows}) catch
-        return mod.errPayload("Allocation error");
-    defer allocator.free(chunk_sql);
 
-    // Atomic: document row and its chunks commit together (or not at all), in one
-    // transaction (one fsync instead of two).
-    conn.begin() catch return mod.errPayload("Failed to begin transaction");
-    _ = conn.execute(doc_sql) catch {
-        conn.rollback();
-        return mod.errPayload("Document upsert failed");
-    };
-    _ = conn.execute(chunk_sql) catch {
-        conn.rollback();
-        return mod.errPayload("Chunk upsert failed");
-    };
-    conn.commit() catch {
-        conn.rollback();
-        return mod.errPayload("Failed to commit transaction");
-    };
+    // Document row + its chunks are written through one bound prepared statement,
+    // committed in windows of `write_batch_rows` (one atomic transaction for an
+    // ingest at or under the window).
+    writeChunksTxn(conn, allocator, doc_sql, rows, batchRows()) catch |e| return writeErrPayload(e);
     invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);
@@ -367,10 +427,7 @@ pub fn upsertChunks(_: Io, allocator: Allocator, conn: *PooledConn, args: ?Value
 
     const rows = parseChunkRows(allocator, document_id, chunks_val.items) catch |err| return errFromChunkParse(allocator, err);
 
-    const sql = mod.renderToOwned(allocator, query.writeUpsertChunks, .{rows}) catch
-        return mod.errPayload("Allocation error");
-    defer allocator.free(sql);
-    _ = conn.execute(sql) catch return mod.errPayload("Chunk upsert failed");
+    writeChunksTxn(conn, allocator, null, rows, batchRows()) catch |e| return writeErrPayload(e);
     invalidateIndex();
 
     var aw = Writer.Allocating.init(allocator);

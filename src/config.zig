@@ -257,6 +257,11 @@ pub const Config = struct {
     max_k: u32 = 1000,
     max_candidates: u32 = 20000,
     mmr_max_n: u32 = 5000,
+    /// Chunk-upsert transaction window, in rows (MCP_WRITE_BATCH_ROWS,
+    /// tier-scaled). Chunks are inserted via one bound prepared statement and
+    /// committed every this-many rows: an ingest at or under the window is one
+    /// atomic transaction; a larger one commits in windows to bound WAL growth.
+    write_batch_rows: u32 = 5000,
     sqlite: SqliteTuning = SqliteTuning.safe_default,
     /// Print the resolved-config table and exit without serving (capacity
     /// preflight). Also settable via the `--print-config` CLI flag.
@@ -306,8 +311,8 @@ pub const Config = struct {
         log.info("qcache: entries={d} threshold={d:.3}; max_request={d}MB", .{
             self.qcache_entries, self.qcache_threshold, self.max_request_bytes / (1024 * 1024),
         });
-        log.info("retrieval caps: max_k={d} max_candidates={d} mmr_max_n={d}", .{
-            self.max_k, self.max_candidates, self.mmr_max_n,
+        log.info("retrieval caps: max_k={d} max_candidates={d} mmr_max_n={d}; write_batch_rows={d}", .{
+            self.max_k, self.max_candidates, self.mmr_max_n, self.write_batch_rows,
         });
         log.info("sqlite: cache={d}MB mmap={d}MB page_size={d} synchronous={s} temp_store={s} wal_ckpt={d} busy_ms={d}", .{
             self.sqlite.cache_kib / 1024,
@@ -420,6 +425,16 @@ fn tierMmrMaxN(t: Tier) u32 {
         .edge => 500,
         .server => 1000,
         .dc => 5000,
+    };
+}
+/// Tier-scaled chunk-upsert window. Larger boxes hold bigger transactions (fewer
+/// commits); smaller ones commit more often to bound memory/WAL.
+fn tierWriteBatchRows(t: Tier) u32 {
+    return switch (t) {
+        .mobile => 500,
+        .edge => 2000,
+        .server => 5000,
+        .dc => 10000,
     };
 }
 
@@ -536,6 +551,7 @@ pub fn load(allocator: std.mem.Allocator) !Config {
         .max_k = envU32("MCP_MAX_K", tierMaxK(tier)),
         .max_candidates = envU32("MCP_MAX_CANDIDATES", tierMaxCandidates(tier)),
         .mmr_max_n = envU32("MCP_MMR_MAX_N", tierMmrMaxN(tier)),
+        .write_batch_rows = @max(1, envU32("MCP_WRITE_BATCH_ROWS", tierWriteBatchRows(tier))),
         .sqlite = resolveSqlite(tier),
         .dry_run = dry_run,
         .database_url = database_url,

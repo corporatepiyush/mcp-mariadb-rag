@@ -150,6 +150,18 @@ pub fn writeUpsertChunks(w: *Writer, rows: []const ChunkRow) !void {
     try w.writeAll(" ON CONFLICT(id) DO UPDATE SET document_id=excluded.document_id, ordinal=excluded.ordinal, content=excluded.content, token_count=excluded.token_count, embedding=excluded.embedding");
 }
 
+/// Parameterized single-row upsert used by the bound-parameter batch writer:
+/// `INSERT INTO rag_chunk (...) VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE …`.
+/// Binding the embedding directly avoids hex-encoding every vector into SQL
+/// text (the dominant cost when ingesting large documents).
+pub fn writeUpsertChunkStmt(w: *Writer) !void {
+    try w.writeAll("INSERT INTO ");
+    try validation.writeQuotedIdent(w, schema.chunk_table);
+    try w.writeAll(" (id, document_id, ordinal, content, token_count, embedding) VALUES (?,?,?,?,?,?)" ++
+        " ON CONFLICT(id) DO UPDATE SET document_id=excluded.document_id, ordinal=excluded.ordinal," ++
+        " content=excluded.content, token_count=excluded.token_count, embedding=excluded.embedding");
+}
+
 pub fn writeDeleteChunksByDocument(w: *Writer, document_id: []const u8) !void {
     try w.writeAll("DELETE FROM ");
     try validation.writeQuotedIdent(w, schema.chunk_table);
