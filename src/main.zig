@@ -45,6 +45,8 @@ pub fn main() !void {
     schema_rag.setEmbeddingDims(config.embed_dims);
 
     config.logResolved();
+    // Publish the resolved config so tool handlers can read tier-scaled caps.
+    config_mod.setActive(&config);
     if (config.dry_run) {
         std.log.info("dry run: exiting without serving (MCP_DRY_RUN)", .{});
         return;

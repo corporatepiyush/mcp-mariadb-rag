@@ -248,6 +248,15 @@ pub const Config = struct {
     // ── Semantic query cache ──
     qcache_entries: u32 = 0,
     qcache_threshold: f32 = 0.97,
+    /// Hard cap on a single stdio request line, in bytes (MCP_MAX_REQUEST_MB,
+    /// tier-scaled). Bounds the per-request arena against a hostile/runaway peer.
+    max_request_bytes: u64 = 64 * 1024 * 1024,
+    // ── Retrieval / fusion caps (PLAN §6) ── Tier-scaled ceilings that clamp
+    // per-request knobs so a small build can't be asked to fuse a huge candidate
+    // set (MMR is O(k·n·d); the candidate ceiling bounds n).
+    max_k: u32 = 1000,
+    max_candidates: u32 = 20000,
+    mmr_max_n: u32 = 5000,
     sqlite: SqliteTuning = SqliteTuning.safe_default,
     /// Print the resolved-config table and exit without serving (capacity
     /// preflight). Also settable via the `--print-config` CLI flag.
@@ -294,7 +303,12 @@ pub const Config = struct {
             self.hnsw_ef_construction,
             self.hnsw_ef_search,
         });
-        log.info("qcache: entries={d} threshold={d:.3}", .{ self.qcache_entries, self.qcache_threshold });
+        log.info("qcache: entries={d} threshold={d:.3}; max_request={d}MB", .{
+            self.qcache_entries, self.qcache_threshold, self.max_request_bytes / (1024 * 1024),
+        });
+        log.info("retrieval caps: max_k={d} max_candidates={d} mmr_max_n={d}", .{
+            self.max_k, self.max_candidates, self.mmr_max_n,
+        });
         log.info("sqlite: cache={d}MB mmap={d}MB page_size={d} synchronous={s} temp_store={s} wal_ckpt={d} busy_ms={d}", .{
             self.sqlite.cache_kib / 1024,
             self.sqlite.mmap_bytes / (1024 * 1024),
@@ -369,6 +383,59 @@ fn tierQCacheEntries(t: Tier) u32 {
         .server => 512,
         .dc => 4096,
     };
+}
+
+/// Tier-scaled default cap on a single request line, in MiB. Sized so a base64
+/// document upload fits at each tier while still bounding the arena.
+fn tierMaxRequestMb(t: Tier) u64 {
+    return switch (t) {
+        .mobile => 8,
+        .edge => 32,
+        .server => 64,
+        .dc => 256,
+    };
+}
+
+// Retrieval/fusion tier ceilings (PLAN §6). Requested `k`, `vecK`/`textK`, and
+// MMR are clamped to these so the funnel stays within the tier's budget.
+fn tierMaxK(t: Tier) u32 {
+    return switch (t) {
+        .mobile => 20,
+        .edge => 100,
+        .server => 200,
+        .dc => 1000,
+    };
+}
+fn tierMaxCandidates(t: Tier) u32 {
+    return switch (t) {
+        .mobile => 200,
+        .edge => 1000,
+        .server => 2000,
+        .dc => 20000,
+    };
+}
+fn tierMmrMaxN(t: Tier) u32 {
+    return switch (t) {
+        .mobile => 100,
+        .edge => 500,
+        .server => 1000,
+        .dc => 5000,
+    };
+}
+
+// ── Active-config global ───────────────────────────────────────────────
+// Tool handlers get a fixed `(io, allocator, conn, args)` signature, so the
+// resolved config reaches them through this process-wide pointer (same pattern
+// as the index/query-cache globals). Set once at startup; read-only thereafter.
+
+var g_active: ?*const Config = null;
+
+pub fn setActive(cfg: ?*const Config) void {
+    g_active = cfg;
+}
+
+pub fn active() ?*const Config {
+    return g_active;
 }
 
 /// Borrow an env var as a slice (no allocation; valid for the process lifetime).
@@ -465,6 +532,10 @@ pub fn load(allocator: std.mem.Allocator) !Config {
         .hnsw_ef_search = envU32("MCP_HNSW_EF_SEARCH", 64),
         .qcache_entries = envU32("MCP_QCACHE_ENTRIES", tierQCacheEntries(tier)),
         .qcache_threshold = envF32("MCP_QCACHE_THRESHOLD", 0.97),
+        .max_request_bytes = envU64("MCP_MAX_REQUEST_MB", tierMaxRequestMb(tier)) * 1024 * 1024,
+        .max_k = envU32("MCP_MAX_K", tierMaxK(tier)),
+        .max_candidates = envU32("MCP_MAX_CANDIDATES", tierMaxCandidates(tier)),
+        .mmr_max_n = envU32("MCP_MMR_MAX_N", tierMmrMaxN(tier)),
         .sqlite = resolveSqlite(tier),
         .dry_run = dry_run,
         .database_url = database_url,

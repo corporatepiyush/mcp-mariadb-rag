@@ -34,10 +34,17 @@ fn binExists(io: Io) bool {
 /// reach the child. The sqlite dylib is found via the rpath baked
 /// into the binary, so a minimal env suffices.
 fn drive(allocator: std.mem.Allocator, io: Io, db_path: []const u8, requests: []const u8) ![]u8 {
+    return driveEnv(allocator, io, db_path, requests, &.{});
+}
+
+/// Like `drive` but with extra `{name, value}` environment pairs (e.g. to set a
+/// transport cap). Each request is one line; returns all of stdout.
+fn driveEnv(allocator: std.mem.Allocator, io: Io, db_path: []const u8, requests: []const u8, extra: []const [2][]const u8) ![]u8 {
     var env = std.process.Environ.Map.init(allocator);
     defer env.deinit();
     try env.put("MCP_STDIO", "1");
     try env.put("DATABASE_URL", db_path);
+    for (extra) |kv| try env.put(kv[0], kv[1]);
 
     var child = try std.process.spawn(io, .{
         .argv = &.{bin_path},
@@ -228,4 +235,30 @@ test "e2e: KG vector_search returns valid JSON with a distance column" {
     const rows = parsed.value.object.get("rows").?.array;
     try testing.expect(rows.items.len >= 2);
     try testing.expectEqualStrings("v_near", rows.items[0].array.items[0].string);
+}
+
+test "e2e: oversized request is rejected and the stream resyncs" {
+    var threaded: Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    if (!binExists(io)) return;
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    // Cap the request at 1 MiB, then send a ~1.5 MiB line followed by a valid
+    // ping. The big line must be rejected (-32600) and the ping (id 2) answered.
+    var aw = Writer.Allocating.init(a);
+    const w = &aw.writer;
+    try w.writeAll("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\",\"pad\":\"");
+    try w.splatByteAll('A', 1_500_000);
+    try w.writeAll("\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n");
+
+    const db = try tmpDb(a, io, "/tmp/mcp_e2e_oversize.db");
+    const out = try driveEnv(a, io, db, aw.written(), &.{.{ "MCP_MAX_REQUEST_MB", "1" }});
+
+    try testing.expect(std.mem.indexOf(u8, out, "-32600") != null);
+    try testing.expect(std.mem.indexOf(u8, out, "Request exceeds maximum size") != null);
+    // Recovery: the parser resynced at the newline and answered the next request.
+    try testing.expect(std.mem.indexOf(u8, out, "\"id\":2") != null);
 }

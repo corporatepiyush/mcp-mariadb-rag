@@ -17,6 +17,8 @@ comptime {
     _ = @import("tests/doc_json_test.zig");
     _ = @import("tests/doc_mod_test.zig");
     _ = @import("tests/doc_parquet_test.zig");
+    _ = @import("tests/doc_pdf_cmap_test.zig");
+    _ = @import("tests/doc_pdf_filters_test.zig");
     _ = @import("tests/doc_pdf_test.zig");
     _ = @import("tests/doc_pool_test.zig");
     _ = @import("tests/doc_snappy_test.zig");

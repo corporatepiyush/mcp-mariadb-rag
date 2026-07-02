@@ -75,6 +75,8 @@ master `MCP_MEM_BUDGET_MB` (default 70% of RAM) scales the memory envelope.
 | `MCP_INDEX_METRIC` | `cosine` | `cosine` or `euclidean` (index build metric) |
 | `MCP_HNSW_M` / `_EF_CONSTRUCTION` / `_EF_SEARCH` | `16` / `200` / `64` | HNSW params |
 | `MCP_QCACHE_ENTRIES` / `MCP_QCACHE_THRESHOLD` | tier / `0.97` | Semantic query cache |
+| `MCP_MAX_REQUEST_MB` | tier | Cap on a single stdio request line (arena bound) |
+| `MCP_MAX_K` / `MCP_MAX_CANDIDATES` / `MCP_MMR_MAX_N` | tier | Retrieval caps: result count, per-arm candidates, MMR cutoff |
 | `MCP_SQLITE_CACHE_MB` / `_MMAP_MB` / `_PAGE_SIZE` | tier | SQLite storage engine |
 | `MCP_SQLITE_SYNC` / `_TEMP` / `_WAL_CKPT` / `_BUSY_MS` | tier | SQLite durability/IO |
 | `MCP_DRY_RUN` | `false` | Print resolved config and exit |

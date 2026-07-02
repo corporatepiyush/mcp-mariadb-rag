@@ -22,6 +22,7 @@ const retrieve = @import("../rag/retrieve.zig");
 const index_store = @import("../index/store.zig");
 const trace = @import("../observe/trace.zig");
 const query_cache = @import("../generate/cache.zig");
+const config_mod = @import("../config.zig");
 
 const Io = std.Io;
 const Allocator = std.mem.Allocator;
@@ -438,9 +439,16 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
     var tr = trace.Trace.start(io);
     const want_trace = mod.getBoolParam(args, "trace", false);
 
-    const k = getUintParam(args, "k", 10);
-    const vec_k = getUintParam(args, "vecK", 30);
-    const text_k = getUintParam(args, "textK", 30);
+    // Tier-scaled server-side caps (PLAN §6): clamp per-request knobs so a small
+    // build can't be driven past its budget. The candidate ceiling bounds each
+    // retrieval arm; `k` is bounded by max_k.
+    const caps = config_mod.active();
+    const cap_k: u64 = if (caps) |c| c.max_k else std.math.maxInt(u64);
+    const cap_cand: u64 = if (caps) |c| c.max_candidates else std.math.maxInt(u64);
+
+    const k = @min(getUintParam(args, "k", 10), cap_k);
+    const vec_k = @min(getUintParam(args, "vecK", 30), cap_cand);
+    const text_k = @min(getUintParam(args, "textK", 30), cap_cand);
     const metric = query.Metric.parse(mod.getStringParam(args, "metric"));
     const use_mmr = mod.getBoolParam(args, "mmr", false);
     const lambda = getFloatParam(args, "lambda", 0.5);
@@ -525,7 +533,12 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
     var owned_idx: ?[]usize = null;
     defer if (owned_idx) |oi| allocator.free(oi);
 
-    if (use_mmr) {
+    // MMR is O(k·n·d); above the tier's cutoff, fall back to plain RRF order so
+    // the diversify step can't dominate latency on a large fused set.
+    const cap_mmr_n: usize = if (caps) |c| c.mmr_max_n else std.math.maxInt(usize);
+    const do_mmr = use_mmr and fused.len <= cap_mmr_n;
+
+    if (do_mmr) {
         const embs = allocator.alloc([]const f32, fused.len) catch return mod.errPayload("Allocation error");
         defer allocator.free(embs);
         const rels = allocator.alloc(f32, fused.len) catch return mod.errPayload("Allocation error");
@@ -556,7 +569,7 @@ pub fn search(io: Io, allocator: Allocator, conn: *PooledConn, args: ?Value) Pay
         emitted += 1;
         writeResult(w, c, f.score) catch return mod.errPayload("Serialization error");
     }
-    tr.lap(if (use_mmr) "mmr" else "select", emitted);
+    tr.lap(if (do_mmr) "mmr" else "select", emitted);
     w.print("],\"count\":{d}", .{emitted}) catch return mod.errPayload("Serialization error");
     if (want_trace) {
         w.writeAll(",\"trace\":") catch return mod.errPayload("Serialization error");

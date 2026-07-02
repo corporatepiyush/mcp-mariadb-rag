@@ -12,6 +12,7 @@ const testing = std.testing;
 const pool_mod = @import("../src/pool.zig");
 const schema = @import("../src/rag/schema.zig");
 const rag = @import("../src/actions/rag.zig");
+const config_mod = @import("../src/config.zig");
 
 const Writer = std.Io.Writer;
 const Value = std.json.Value;
@@ -188,6 +189,47 @@ test "rag_integration: hybrid search surfaces the relevant chunk" {
     try testing.expect(results.items.len >= 1);
     try testing.expectEqualStrings("doc1#1", results.items[0].object.get("id").?.string);
     try testing.expect(std.mem.indexOf(u8, results.items[0].object.get("content").?.string, "neural") != null);
+}
+
+test "rag_integration: tier max_k clamps the result count" {
+    const url = dbUrl() orelse return;
+
+    var threaded: std.Io.Threaded = .init(testing.allocator, .{});
+    defer threaded.deinit();
+    const io = threaded.io();
+    var pool = try pool_mod.ConnectionPool.init(io, testing.allocator, url, .{
+        .min_size = 1, .max_size = 2,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+    });
+    defer pool.close();
+    var conn = try pool.acquire();
+    defer conn.deinit();
+
+    dropTables(&conn);
+    createTables(&conn);
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    try testing.expect(!rag.ingestDocument(io, a, &conn, parseJson(a, ingestArgs(a))).is_error);
+
+    // Publish a config whose max_k is 1; a request for k=3 must be clamped to 1.
+    var caps: config_mod.Config = .{
+        .database_url = "",
+        .server = undefined,
+        .pool = undefined,
+        .tls = .{ .enforce = false, .verify = false, .ca_path = null },
+        .max_k = 1,
+    };
+    config_mod.setActive(&caps);
+    defer config_mod.setActive(null);
+
+    const res = rag.search(io, a, &conn, parseJson(a, searchArgs(a, "learning", 0.9, ",\"k\":3")));
+    try testing.expect(!res.is_error);
+    const parsed = try std.json.parseFromSlice(Value, a, res.text, .{});
+    const results = parsed.value.object.get("results").?.array;
+    try testing.expectEqual(@as(usize, 1), results.items.len);
 }
 
 test "rag_integration: vector search with cosine metric" {
